@@ -1,0 +1,45 @@
+const permissionsByAction = {
+  open_app: null,
+  close_app: null,
+  restart_app: null,
+  focus_app: null,
+  switch_app: null,
+  check_app_running: null,
+  get_active_window: null,
+  list_open_windows: null,
+  session_summary: null,
+  recent_activity: null,
+  minimize_window: null,
+  maximize_window: null,
+  restore_window: null,
+  focus_window: null,
+  open_folder: null,
+  show_in_explorer: null,
+  create_folder: null,
+  rename_folder: null,
+  move_folder: null,
+  copy_folder_path: null,
+  search_file: null,
+  open_file: null,
+  open_latest_file: null,
+  rename_file: null,
+  move_file: null,
+  copy_file_path: null,
+  get_file_details: null,
+  read_clipboard: null,
+  copy_text_to_clipboard: null,
+  clear_clipboard: null,
+  take_screenshot: null,
+  open_url: null,
+  web_search: null,
+  open_ceaser: null,
+  system_info: null,
+  open_settings: null,
+  lock_computer: null,
+}
+
+function permissionFor(action) {
+  return permissionsByAction[action] ?? null
+}
+
+module.exports = { permissionFor }

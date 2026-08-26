@@ -1,0 +1,2 @@
+public/downloads/CEASER-Desktop-Setup.exe filter=lfs diff=lfs merge=lfs -text
+assets/desktop/CEASER-Desktop-Setup.exe filter=lfs diff=lfs merge=lfs -text

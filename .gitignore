@@ -1,0 +1,35 @@
+# Local environment and credentials
+.env
+.env.local
+.env.runtime
+.env.production
+.env.development
+!.env.example
+*.pem
+*.key
+*credentials*.json
+
+# Dependencies and virtual environments
+node_modules/
+.venv/
+venv/
+
+# Generated output and caches
+.next/
+out/
+dist/
+build/
+release/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+*.pyo
+
+# Local staging and IDE files
+.stage*-temp/
+.ceaserfull-*/
+.vscode/
+.idea/
+*.log

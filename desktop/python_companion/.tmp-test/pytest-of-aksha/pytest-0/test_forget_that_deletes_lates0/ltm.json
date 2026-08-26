@@ -1,0 +1,21 @@
+[
+  {
+    "confidence": 0.92,
+    "content": "User prefers brief answers.",
+    "created_at": 1786520495.18761,
+    "expires_at": null,
+    "id": "mem_4a64a7e7f5a304c9d671",
+    "importance": 0.8,
+    "last_used_at": null,
+    "sensitive": false,
+    "source": "user",
+    "status": "deleted",
+    "structured_data": {
+      "response_length": "brief"
+    },
+    "type": "preference",
+    "updated_at": 1786520495.2229445,
+    "user_confirmed": true,
+    "user_id": "user-a"
+  }
+]

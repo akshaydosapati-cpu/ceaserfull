@@ -1,0 +1,42 @@
+[
+  {
+    "confidence": 0.94,
+    "content": "CliniLocker is the user's healthcare project.",
+    "created_at": 1786520495.4352973,
+    "expires_at": null,
+    "id": "mem_5d291f55f14fc7068916",
+    "importance": 0.9,
+    "last_used_at": null,
+    "sensitive": false,
+    "source": "user",
+    "status": "active",
+    "structured_data": {
+      "domain": "healthcare",
+      "project": "CliniLocker"
+    },
+    "type": "project",
+    "updated_at": 1786520495.4352973,
+    "user_confirmed": true,
+    "user_id": "user-a"
+  },
+  {
+    "confidence": 0.94,
+    "content": "Turisst is the user's travel project.",
+    "created_at": 1786520495.4657557,
+    "expires_at": null,
+    "id": "mem_45c2f207885f676a96c1",
+    "importance": 0.9,
+    "last_used_at": null,
+    "sensitive": false,
+    "source": "user",
+    "status": "active",
+    "structured_data": {
+      "domain": "travel",
+      "project": "Turisst"
+    },
+    "type": "project",
+    "updated_at": 1786520495.4657557,
+    "user_confirmed": true,
+    "user_id": "user-a"
+  }
+]

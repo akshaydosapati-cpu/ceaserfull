@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CEASER Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="app" class="overlay compact" data-state="idle">
+      <section class="minimal-shell" data-mode-target="compact">
+        <div class="orb"><img src="./assets/ceaser-orb.png" alt="CEASER" /></div>
+      </section>
+
+      <section class="compact-shell" data-mode-target="expanded">
+        <div class="compact-brand">
+          <div class="orb"><img src="./assets/ceaser-orb.png" alt="" /></div>
+          <strong>CEASER</strong>
+        </div>
+        <div class="compact-body">
+          <strong id="compactTitle" class="sr-only">CEASER</strong>
+          <span id="compactSubtitle">How can I help?</span>
+        </div>
+        <div class="compact-visual">
+          <div class="waveform" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="compact-progress"><span id="compactProgressBar"></span></div>
+          <span id="capsuleStatusDot" class="capsule-status-dot" aria-hidden="true"></span>
+        </div>
+        <button id="expandButton" class="capsule-expand" type="button" aria-label="Expand CEASER" title="Expand CEASER">&#8595;</button>
+      </section>
+
+      <section class="expanded-shell">
+        <header class="overlay-header">
+          <div class="surface-identity">
+            <div class="orb"><img src="./assets/ceaser-orb.png" alt="" /></div>
+            <strong class="overlay-title">CEASER</strong>
+            <span id="surfaceStateLabel" class="surface-state-label">Ready</span>
+            <span class="capsule-status-dot" aria-hidden="true"></span>
+          </div>
+          <div class="window-actions">
+            <button id="accountButton" class="account-button" type="button" aria-label="Connect CEASER account" title="Connect CEASER account">Connect</button>
+            <button id="helpButton" class="icon-button help-button" type="button" aria-label="How to use CEASER" title="How to use CEASER">?</button>
+            <button id="diagnosticsButton" class="icon-button diagnostics-button" type="button" aria-label="Live diagnostics" title="Live diagnostics">&gt;_</button>
+            <button id="minimalButton" class="icon-button minimize-button" type="button" aria-label="Minimize overlay"><span></span></button>
+            <button id="compactButton" class="icon-button close-button" type="button" aria-label="Collapse overlay" title="Collapse">&times;</button>
+          </div>
+        </header>
+
+        <section id="diagnosticsPanel" class="diagnostics-panel hidden" aria-live="polite">
+          <div class="diagnostics-head">
+            <div><strong>Live diagnostics</strong><span id="diagnosticsStatus">Runtime status</span></div>
+            <div class="diagnostics-actions">
+              <button id="openLogsButton" type="button">Open logs folder</button>
+              <button id="closeDiagnosticsButton" type="button" aria-label="Close diagnostics">×</button>
+            </div>
+          </div>
+          <div id="diagnosticsSummary" class="diagnostics-summary"></div>
+          <div id="diagnosticsLog" class="diagnostics-log"></div>
+        </section>
+
+        <section id="guidePanel" class="guide-panel hidden" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+          <div class="guide-head">
+            <div class="guide-brand"><div class="orb"><img src="./assets/ceaser-orb.png" alt="" /></div><span>CEASER Desktop Guide</span></div>
+            <button id="closeGuideButton" type="button" aria-label="Close guide">&times;</button>
+          </div>
+          <div class="guide-progress" aria-label="Tutorial progress"><span id="guideProgressBar"></span></div>
+          <div class="guide-content">
+            <span id="guideStepLabel" class="guide-step-label">Step 1 of 4</span>
+            <div id="guideIcon" class="guide-icon" aria-hidden="true">01</div>
+            <h2 id="guideTitle">Welcome to CEASER</h2>
+            <p id="guideDescription">Connect your CEASER account once to use AI, projects, memory, files, and integrations from your desktop.</p>
+            <div id="guideExamples" class="guide-examples"></div>
+          </div>
+          <div class="guide-actions">
+            <button id="guideBackButton" class="guide-secondary" type="button">Back</button>
+            <button id="guideSkipButton" class="guide-link" type="button">Skip tutorial</button>
+            <button id="guideNextButton" class="guide-primary" type="button">Next</button>
+          </div>
+        </section>
+
+        <div id="promptBubble" class="prompt-bubble hidden"></div>
+
+        <section id="dynamicPanel" class="dynamic-panel idle-panel">
+          <div class="idle-orb">
+            <div class="voice-circle">
+              <img src="./assets/ceaser-orb.png" alt="CEASER" />
+              <div class="waveform" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+            </div>
+          </div>
+          <h1 id="stateTitle">Hey there,</h1>
+          <p id="stateSubtitle">How can I help you today?</p>
+        </section>
+
+        <section class="steps-card hidden">
+          <div class="section-title">
+            <strong>Live Progress</strong>
+            <span id="progressPercent">0%</span>
+          </div>
+          <ul id="stepsList"></ul>
+        </section>
+
+        <section id="confirmationCard" class="confirmation-card hidden">
+          <strong>Waiting for confirmation</strong>
+          <p id="confirmationText">CEASER needs confirmation before continuing.</p>
+          <div class="button-row">
+            <button id="cancelAction" type="button" class="secondary">Cancel</button>
+            <button id="confirmAction" type="button">Confirm</button>
+          </div>
+        </section>
+
+        <form id="commandForm" class="command-form overlay-askbar">
+          <button id="openAppButton" class="source-button" type="button" aria-label="Open CEASER App">▣</button>
+          <button id="attachFileButton" class="source-button" type="button" aria-label="Attach image or video" title="Attach image or video">+</button>
+          <input id="commandInput" type="text" placeholder="Ask anything..." autocomplete="off" />
+          <button id="resetButton" type="button" class="hidden">New Command</button>
+          <button type="submit" class="hidden">Send</button>
+        </form>
+
+        <div class="legacy-hidden">
+          <p id="stateEyebrow">Idle</p>
+          <span id="compactOnly"></span>
+          <span id="progressBar"></span>
+          <strong id="activeAgent">CEASER</strong>
+          <span id="intentType">Ready</span>
+          <span id="currentApp">Checking...</span>
+          <span id="recentFile">None yet</span>
+          <span id="sessionSummary">CEASER is building session awareness.</span>
+          <span id="contextStatus">Live</span>
+          <h2 id="resultTitle">Ready</h2>
+          <p id="resultSummary">CEASER is available on your desktop.</p>
+          <div id="resultStats"></div>
+        </div>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

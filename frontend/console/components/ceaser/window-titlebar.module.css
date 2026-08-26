@@ -1,0 +1,93 @@
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 16px;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border-bottom: 1px solid #0f3460;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: drag;
+  gap: 16px;
+}
+
+.branding {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 14px;
+  color: white;
+  box-shadow: 0 2px 8px rgba(231, 76, 60, 0.3);
+}
+
+.appName {
+  font-weight: 600;
+  font-size: 14px;
+  color: #ecf0f1;
+  letter-spacing: 0.5px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+  align-items: center;
+}
+
+.controlBtn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: #bdc3c7;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 200ms ease;
+  padding: 0;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #ecf0f1;
+  }
+
+  &:active {
+    background: rgba(255, 255, 255, 0.15);
+    transform: scale(0.95);
+  }
+}
+
+.closeBtn {
+  &:hover {
+    background: #e74c3c;
+    color: white;
+  }
+
+  &:active {
+    background: #c0392b;
+  }
+}
+
+/* Windows 11 style for maximized state */
+.titlebar.maximized {
+  padding: 0 12px;
+}

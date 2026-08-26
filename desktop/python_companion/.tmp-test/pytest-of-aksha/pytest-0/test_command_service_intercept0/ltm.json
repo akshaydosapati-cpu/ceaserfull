@@ -1,0 +1,22 @@
+[
+  {
+    "confidence": 0.94,
+    "content": "CliniLocker is the user's healthcare project.",
+    "created_at": 1786520495.5885985,
+    "expires_at": null,
+    "id": "mem_5d291f55f14fc7068916",
+    "importance": 0.9,
+    "last_used_at": null,
+    "sensitive": false,
+    "source": "user",
+    "status": "active",
+    "structured_data": {
+      "domain": "healthcare",
+      "project": "CliniLocker"
+    },
+    "type": "project",
+    "updated_at": 1786520495.61491,
+    "user_confirmed": true,
+    "user_id": "user-a"
+  }
+]

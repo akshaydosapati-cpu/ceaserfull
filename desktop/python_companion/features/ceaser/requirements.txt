@@ -1,0 +1,23 @@
+fastapi
+uvicorn
+supabase
+pydantic
+requests
+openai
+pyttsx3
+speechrecognition
+pyautogui
+wikipedia
+pywhatkit
+selenium
+plyer
+python-dotenv
+opencv-python
+numpy
+pyperclip
+pygetwindow
+# Optional/OS-specific:
+# winsound (Windows only, built-in)
+# deepface (for vision, optional)
+# chromadb (for memory, optional)
+pywin32 (for Office control, Windows only)

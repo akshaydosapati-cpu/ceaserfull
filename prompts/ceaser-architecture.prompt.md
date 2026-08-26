@@ -1,0 +1,1 @@
+Create a production-grade Next.js 15 + TypeScript frontend architecture for CEASER exactly following the requested folder structure and module boundaries. Generate folders, routes, Zustand stores, TypeScript types, placeholder pages, shared layouts, and scalable feature-based architecture. Do not build UI yet. Focus entirely on maintainability and scalability.

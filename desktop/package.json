@@ -1,0 +1,71 @@
+{
+  "name": "ceaser-desktop",
+  "version": "0.1.1",
+  "description": "CEASER desktop companion, overlay, and voice-first AI OS presence.",
+  "author": "Ceaser(RNJ Pvt Ltd)",
+  "private": true,
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node scripts/start-electron.mjs",
+    "build": "node scripts/validate.mjs",
+    "build:frontend": "node scripts/build-frontend.mjs",
+    "prepare:runtime": "node scripts/prepare-runtime-env.mjs && node scripts/prepare-python-package.mjs && node scripts/prepare-python-runtime.mjs",
+    "dist": "npm run prepare:runtime && npm run build && electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "ai.ceaser.desktop",
+    "productName": "CEASER",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".env.runtime",
+        "to": ".env"
+      },
+      {
+        "from": "../website/console/public/favicon-64.png",
+        "to": "favicon-64.png"
+      },
+      {
+        "from": "build/python-runtime/ceaser_voice_runtime",
+        "to": "python"
+      },
+      {
+        "from": "build/python_companion-package",
+        "to": "python_companion",
+        "filter": [
+          "**/*",
+          "!**/.pytest_cache{,/**/*}",
+          "!**/__pycache__{,/**/*}",
+          "!**/*.pyc",
+          "!**/*.pyo"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CEASER"
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

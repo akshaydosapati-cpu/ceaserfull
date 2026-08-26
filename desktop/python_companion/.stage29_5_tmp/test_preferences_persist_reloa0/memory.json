@@ -1,0 +1,30 @@
+[
+  {
+    "confidence": 1.0,
+    "content": "CEASER companion preferences",
+    "created_at": 1786796455.0096638,
+    "expires_at": null,
+    "id": "companion_preferences_fc95297aa4f56781",
+    "importance": 0.8,
+    "last_used_at": null,
+    "sensitive": false,
+    "source": "user_settings",
+    "status": "active",
+    "structured_data": {
+      "companion_preferences": {
+        "code_switching": true,
+        "conversation_style": "balanced",
+        "humor": "high",
+        "language": "Telugu",
+        "preferred_address": "",
+        "proactive_mode": "companion",
+        "roasting": "light",
+        "technical_terms": "English"
+      }
+    },
+    "type": "preference",
+    "updated_at": 1786796455.0096638,
+    "user_confirmed": true,
+    "user_id": "user-a"
+  }
+]

@@ -1,0 +1,5 @@
+console/node_modules/
+console/.next/
+console/out/
+console/.env*.local
+/public/

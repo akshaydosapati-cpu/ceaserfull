@@ -1,0 +1,29 @@
+fastapi
+uvicorn
+requests
+google-cloud-speech
+google-cloud-texttospeech
+google-cloud-translate
+# Keep Google SDK protobuf dependencies compatible with CEASER's existing
+# OpenTelemetry/runtime stack on Python 3.13.
+protobuf==5.29.5
+grpcio==1.71.2
+grpcio-status==1.71.2
+grpc-google-iam-v1==0.14.2
+pyautogui
+pyttsx3
+speechrecognition
+pydantic
+pvporcupine
+pywin32
+openai
+duckduckgo-search
+aiohttp
+supabase
+python-dotenv 
+PyPDF2
+python-docx
+openpyxl
+pandas
+Pillow
+pytesseract
