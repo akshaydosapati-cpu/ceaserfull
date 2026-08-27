@@ -112,6 +112,15 @@
           </div>
         </section>
 
+        <section id="inactivityPromptCard" class="confirmation-card inactivity-prompt hidden" role="dialog" aria-modal="true" aria-labelledby="inactivityPromptTitle">
+          <strong id="inactivityPromptTitle">CEASER is still running</strong>
+          <p id="inactivityPromptText">You haven't interacted with CEASER for 5 minutes. Would you like CEASER to stay active or run silently in the background?</p>
+          <div class="button-row">
+            <button id="inactivityContinueButton" type="button" class="secondary">Continue Active</button>
+            <button id="inactivitySilentButton" type="button">Go Silent</button>
+          </div>
+        </section>
+
         <form id="commandForm" class="command-form overlay-askbar">
           <button id="openAppButton" class="source-button" type="button" aria-label="Open CEASER App">▣</button>
           <button id="attachFileButton" class="source-button" type="button" aria-label="Attach image or video" title="Attach image or video">+</button>

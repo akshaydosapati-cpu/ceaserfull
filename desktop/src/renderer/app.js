@@ -1,4 +1,4 @@
-const appShell = document.getElementById("app")
+﻿const appShell = document.getElementById("app")
 const compactTitle = document.getElementById("compactTitle")
 const compactSubtitle = document.getElementById("compactSubtitle")
 const compactProgressBar = document.getElementById("compactProgressBar")
@@ -38,6 +38,10 @@ const guideDescription = document.getElementById("guideDescription")
 const guideExamples = document.getElementById("guideExamples")
 const guideBackButton = document.getElementById("guideBackButton")
 const guideNextButton = document.getElementById("guideNextButton")
+const inactivityPromptCard = document.getElementById("inactivityPromptCard")
+const inactivityPromptText = document.getElementById("inactivityPromptText")
+const inactivityContinueButton = document.getElementById("inactivityContinueButton")
+const inactivitySilentButton = document.getElementById("inactivitySilentButton")
 
 let pendingIntent = null
 let activeMode = "compact"
@@ -115,6 +119,14 @@ const DESKTOP_GUIDE_STEPS = [
   },
 ]
 let guideStepIndex = 0
+const INACTIVITY_TIMEOUT_MS = 300000
+const ACTIVITY_THROTTLE_MS = 1200
+let inactivityTimer = null
+let inactivityPromptVisible = false
+let overlayVisible = true
+let silentBackgroundActive = false
+let lastActivityPulseAt = 0
+let preSilentInteractionState = null
 
 function renderGuideStep() {
   const step = DESKTOP_GUIDE_STEPS[guideStepIndex]
@@ -153,6 +165,136 @@ function maybeShowFirstRunGuide() {
   if (window.localStorage.getItem(DESKTOP_GUIDE_KEY) === "true") return
   window.setTimeout(() => showDesktopGuide({ firstRun: true }), 450)
 }
+
+function clearInactivityTimer() {
+  if (inactivityTimer) {
+    window.clearTimeout(inactivityTimer)
+    inactivityTimer = null
+  }
+}
+
+function hideInactivityPrompt() {
+  inactivityPromptVisible = false
+  inactivityPromptCard?.classList.add("hidden")
+}
+
+function updateActivitySurface() {
+  if (silentBackgroundActive) {
+    appShell.dataset.background = "silent"
+    setState("silent_background", "Running silently", overlayVisible ? "CEASER is paused in the background." : "CEASER will resume when you open it.")
+  } else {
+    appShell.dataset.background = "active"
+  }
+}
+
+function restoreFromSilentBackground(reason = "resume") {
+  if (!silentBackgroundActive) return
+  silentBackgroundActive = false
+  preSilentInteractionState = null
+  hideInactivityPrompt()
+  showPrompt("")
+  updateActivitySurface()
+  if (overlayVisible) {
+    setState("idle", "CEASER ready", "How can I help?")
+    renderIdlePanel()
+  }
+  console.log('[CEASER] Silent background ended: ' + reason)
+  scheduleInactivityTimer(reason)
+}
+
+function forceStopVoiceCommand() {
+  if (!listeningActive && !recorder && !mediaStream && !audioContext) return
+  stoppingVoice = true
+  setVoiceButtonState(false)
+  if (recorder?.state === "recording") recorder.stop()
+  else cleanupRecording()
+}
+
+function stopVoiceForSilentMode() {
+  stopCurrentSpeech("silent-background")
+  if (holdSpeechRecognition) stopHoldSpeechCommand()
+  if (listeningActive) forceStopVoiceCommand()
+  if (alwaysListenActive || assistantSessionActive || passiveWakeLoopRunning) {
+    voiceCommandGeneration += 1
+    alwaysListenActive = false
+    assistantSessionActive = false
+    passiveWakeLoopRunning = false
+    passiveWakeLoopOwner = null
+    window.clearTimeout(restartListenTimer)
+    restartListenTimer = null
+  }
+  setVoiceButtonState(false)
+  restoreMediaAfterListening("silent-mode")
+}
+
+function enterSilentBackground(reason = "timeout") {
+  if (silentBackgroundActive) return
+  clearInactivityTimer()
+  hideInactivityPrompt()
+  preSilentInteractionState = {
+    activeMode,
+    assistantSessionActive,
+    alwaysListenActive,
+  }
+  silentBackgroundActive = true
+  stopVoiceForSilentMode()
+  updateActivitySurface()
+  if (overlayVisible) {
+    setState("silent_background", "Running silently", "CEASER will stay available in the tray.")
+    showPrompt("CEASER is running silently in the background.")
+    window.ceaserDesktop?.hideOverlay?.({ reason: 'silent_background_' + reason })
+  }
+  console.log('[CEASER] Silent background entered: ' + reason)
+}
+
+function showInactivityPrompt() {
+  if (!overlayVisible || silentBackgroundActive) return
+  inactivityPromptVisible = true
+  clearInactivityTimer()
+  setMode("expanded")
+  updateActivitySurface()
+  inactivityPromptCard?.classList.remove("hidden")
+  if (inactivityPromptText) {
+    inactivityPromptText.textContent = "You haven't interacted with CEASER for 5 minutes. Would you like CEASER to stay active or run silently in the background?"
+  }
+  setState("idle", "Still here?", "Choose how CEASER should behave.")
+  fitOverlay()
+}
+
+function scheduleInactivityTimer(reason = "activity") {
+  clearInactivityTimer()
+  if (inactivityPromptVisible) return
+  if (silentBackgroundActive && !overlayVisible) return
+  inactivityTimer = window.setTimeout(() => handleInactivityTimeout(reason), INACTIVITY_TIMEOUT_MS)
+}
+
+function handleInactivityTimeout(reason = "timer") {
+  if (silentBackgroundActive) return
+  if (!overlayVisible) {
+    enterSilentBackground(reason)
+    return
+  }
+  showInactivityPrompt()
+}
+
+function markUserActivity(reason = "interaction", { force = false } = {}) {
+  const now = Date.now()
+  if (!force && reason === "pointermove" && now - lastActivityPulseAt < ACTIVITY_THROTTLE_MS) return
+  lastActivityPulseAt = now
+  if (inactivityPromptVisible) hideInactivityPrompt()
+  if (silentBackgroundActive) restoreFromSilentBackground(reason)
+  scheduleInactivityTimer(reason)
+}
+
+function bindInactivityActivityTracking() {
+  const events = ["pointerdown", "keydown", "focusin", "submit", "dragstart", "drop", "wheel", "touchstart"]
+  for (const eventName of events) {
+    document.addEventListener(eventName, () => markUserActivity(eventName), true)
+  }
+  document.addEventListener("mousemove", () => markUserActivity("pointermove"), true)
+}
+
+bindInactivityActivityTracking()
 
 function renderDiagnosticEntry(entry) {
   if (!diagnosticsLog || !entry) return
@@ -320,6 +462,7 @@ function setMode(mode) {
   // minimal-mode callers collapse into the same capsule rather than an orb.
   activeMode = mode === "minimal" ? "compact" : mode
   appShell.className = `overlay ${activeMode}`
+  updateActivitySurface()
   window.ceaserDesktop?.setMode(activeMode)?.finally(() => fitOverlay())
 }
 
@@ -419,6 +562,7 @@ function capsuleStateLabel(state) {
     waiting_for_confirmation: "Needs attention",
     clarifying: "Needs input",
     offline: "Offline",
+    silent_background: "Silent",
     error: "Needs attention",
   })[state] || "Ready"
 }
@@ -638,8 +782,8 @@ function renderDynamicIntent(intent) {
     setDynamicPanel("weather-card", `
       <div class="weather-location">${escapeHtml(intent.parameters?.location || "Hyderabad, IN")}<span>Checking weather...</span></div>
       <div class="weather-main">
-        <div class="weather-icon">⛅</div>
-        <div class="weather-temp">--°C</div>
+        <div class="weather-icon">â›…</div>
+        <div class="weather-temp">--Â°C</div>
         <div class="weather-meta"><span>Humidity</span><strong>--</strong><span>Wind</span><strong>--</strong></div>
       </div>
     `)
@@ -738,25 +882,25 @@ function renderWeatherPanel(weather, fallback) {
   setDynamicPanel("weather-card", `
     <div class="weather-location">${escapeHtml(location)}<span>${escapeHtml(new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))}</span></div>
     <div class="weather-main">
-      <div class="weather-icon">${/rain/i.test(description) ? "🌧️" : /cloud/i.test(description) ? "⛅" : "☀️"}</div>
-      <div><div class="weather-temp">${temp}°C</div><p>${escapeHtml(description)}</p></div>
+      <div class="weather-icon">${/rain/i.test(description) ? "ðŸŒ§ï¸" : /cloud/i.test(description) ? "â›…" : "â˜€ï¸"}</div>
+      <div><div class="weather-temp">${temp}Â°C</div><p>${escapeHtml(description)}</p></div>
       <div class="weather-meta"><span>Humidity</span><strong>${humidity}</strong><span>Wind</span><strong>${wind}</strong></div>
     </div>
-    <div class="forecast-row">${["Now","11 AM","12 PM","1 PM","2 PM","3 PM","4 PM"].map((label, index) => `<span>${label}<b>${index % 3 === 0 ? "☀️" : "⛅"}</b><small>${temp + (index % 4)}°</small></span>`).join("")}</div>
+    <div class="forecast-row">${["Now","11 AM","12 PM","1 PM","2 PM","3 PM","4 PM"].map((label, index) => `<span>${label}<b>${index % 3 === 0 ? "â˜€ï¸" : "â›…"}</b><small>${temp + (index % 4)}Â°</small></span>`).join("")}</div>
   `)
 }
 
 function renderNewsPanel(articles, fallback) {
   const rows = articles.slice(0, 4).map((article) => `
     <div class="news-item">
-      <div><div class="news-title">${escapeHtml(article.title || "News update")}</div><div class="news-source">${escapeHtml(article.source || article.publisher || "News")} · ${escapeHtml(article.published_at || "Latest")}</div></div>
+      <div><div class="news-title">${escapeHtml(article.title || "News update")}</div><div class="news-source">${escapeHtml(article.source || article.publisher || "News")} Â· ${escapeHtml(article.published_at || "Latest")}</div></div>
       ${article.image_url || article.urlToImage ? `<img class="news-thumb" src="${escapeHtml(article.image_url || article.urlToImage)}" alt="">` : `<div class="news-thumb"></div>`}
     </div>
   `).join("")
   setDynamicPanel("news-card", `
     <h3>Top News</h3>
     ${rows || `<div class="view-more">${escapeHtml(fallback || "No live headlines available yet.")}</div>`}
-    <div class="view-more">View more news ›</div>
+    <div class="view-more">View more news â€º</div>
   `)
 }
 
@@ -767,7 +911,7 @@ function renderMusicPanel(title) {
       <h2>${escapeHtml(title || "Music")}</h2>
       <p>YouTube</p>
       <div class="player-line"></div>
-      <div class="player-controls"><span>◀</span><span class="play-circle">Ⅱ</span><span>▶</span></div>
+      <div class="player-controls"><span>â—€</span><span class="play-circle">â…¡</span><span>â–¶</span></div>
     </div>
   `)
 }
@@ -777,7 +921,7 @@ function renderCalendarPanel(message = "", events = [], range = "today") {
     ["", message || "No events found.", range === "tomorrow" ? "Tomorrow" : "Calendar"],
   ]
   setDynamicPanel("calendar-card", `
-    <h3>Today · ${escapeHtml(new Date().toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</h3>
+    <h3>Today Â· ${escapeHtml(new Date().toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</h3>
     ${rows.map(([time, title, duration]) => `<div class="calendar-item"><div class="calendar-time">${escapeHtml(time)}</div><div class="calendar-title">${escapeHtml(title)}</div><div class="calendar-meta">${escapeHtml(duration)}</div></div>`).join("")}
     <div class="view-more">${events.length ? "Open Calendar" : "Connect or sync Google Calendar in CEASER"}</div>
   `)
@@ -793,13 +937,13 @@ function renderTasksPanel(message = "") {
   setDynamicPanel("tasks-card", `
     <h3>My Tasks</h3>
     ${rows.map(([title, priority]) => `<div class="task-item"><span class="task-check"></span><div class="task-title">${title}</div><span class="priority ${priority}">${priority}</span></div>`).join("")}
-    <div class="view-more">${message ? escapeHtml(message) : "View all tasks ›"}</div>
+    <div class="view-more">${message ? escapeHtml(message) : "View all tasks â€º"}</div>
   `)
 }
 
 function renderStockPanel(stock, message = "") {
   setDynamicPanel("stock-card", `
-    <div class="stock-logo"></div>
+    <div class="stock-logo">ï£¿</div>
     <div>
       <h2>${escapeHtml(stock?.query || "Market Snapshot")}</h2>
       <div class="stock-price">Live data</div>
@@ -816,7 +960,7 @@ function renderTimerPanel(timer) {
   const label = `${String(minutes).padStart(2, "0")}:00`
   setDynamicPanel("timer-card", `
     <div class="timer-ring"><div class="timer-inner"><strong>${escapeHtml(label)}</strong><span>Timer</span></div></div>
-    <div class="timer-actions"><span>Ⅱ Pause</span><span>× Cancel</span></div>
+    <div class="timer-actions"><span>â…¡ Pause</span><span>Ã— Cancel</span></div>
   `)
 }
 
@@ -1033,7 +1177,7 @@ function speak(text, onend) {
 
 function compactLogText(value, limit = 260) {
   const text = String(value || "").replace(/\s+/g, " ").trim()
-  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+  return text.length > limit ? `${text.slice(0, limit - 1)}â€¦` : text
 }
 
 function logSpokenResponse(command, spoken, response = {}) {
@@ -2428,8 +2572,8 @@ document.getElementById("cancelAction").addEventListener("click", () => {
   setState("idle", "Cancelled", "No action was taken.")
 })
 
-document.getElementById("minimalButton")?.addEventListener("click", () => setMode("compact"))
-document.getElementById("compactButton")?.addEventListener("click", () => setMode("compact"))
+document.getElementById("minimalButton")?.addEventListener("click", () => window.ceaserDesktop?.hideOverlay?.({ reason: "toolbar_minimize" }))
+document.getElementById("compactButton")?.addEventListener("click", () => window.ceaserDesktop?.hideOverlay?.({ reason: "toolbar_close" }))
 document.getElementById("expandButton")?.addEventListener("click", () => setMode("expanded"))
 document.querySelector(".minimal-shell")?.addEventListener("dblclick", () => setMode("compact"))
 document.querySelector(".compact-shell")?.addEventListener("dblclick", () => setMode("expanded"))
@@ -2475,6 +2619,20 @@ document.getElementById("resetButton").addEventListener("click", () => {
   resultSummary.textContent = "CEASER is available on your desktop."
 })
 
+inactivityContinueButton?.addEventListener("click", () => {
+  hideInactivityPrompt()
+  restoreFromSilentBackground("continue-active")
+  setState("idle", "CEASER ready", "How can I help?")
+  renderIdlePanel()
+  showPrompt("")
+  scheduleInactivityTimer("continue-active")
+})
+
+inactivitySilentButton?.addEventListener("click", () => {
+  hideInactivityPrompt()
+  enterSilentBackground("user_choice")
+})
+
 function renderDynamicIntent(intent) {
   if (!dynamicPanel) return
   const action = intent?.action
@@ -2483,7 +2641,7 @@ function renderDynamicIntent(intent) {
       <div class="weather-location">${escapeHtml(intent.parameters?.location || "Hyderabad, IN")}<span>Checking weather...</span></div>
       <div class="weather-main">
         <div class="weather-icon cloud"></div>
-        <div class="weather-copy"><div class="weather-temp">--°C</div><p>Loading forecast</p></div>
+        <div class="weather-copy"><div class="weather-temp">--Â°C</div><p>Loading forecast</p></div>
         <div class="weather-meta"><span>Humidity</span><strong>--</strong><span>Wind</span><strong>--</strong></div>
       </div>
     `)
@@ -2531,24 +2689,24 @@ function renderWeatherPanel(weather, fallback) {
     <div class="weather-location">${escapeHtml(location)}<span>${escapeHtml(new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))}</span></div>
     <div class="weather-main">
       <div class="weather-icon ${iconClass}"></div>
-      <div class="weather-copy"><div class="weather-temp">${temp}°C</div><p>${escapeHtml(description)}</p></div>
+      <div class="weather-copy"><div class="weather-temp">${temp}Â°C</div><p>${escapeHtml(description)}</p></div>
       <div class="weather-meta"><span>Humidity</span><strong>${humidity}</strong><span>Wind</span><strong>${wind}</strong></div>
     </div>
-    <div class="forecast-row">${["Now","11 AM","12 PM","1 PM","2 PM","3 PM","4 PM"].map((label, index) => `<span>${label}<b>${index % 3 === 0 ? "Clear" : "Cloud"}</b><small>${temp + (index % 4)}°</small></span>`).join("")}</div>
+    <div class="forecast-row">${["Now","11 AM","12 PM","1 PM","2 PM","3 PM","4 PM"].map((label, index) => `<span>${label}<b>${index % 3 === 0 ? "Clear" : "Cloud"}</b><small>${temp + (index % 4)}Â°</small></span>`).join("")}</div>
   `)
 }
 
 function renderNewsPanel(articles, fallback) {
   const rows = articles.slice(0, 4).map((article) => `
     <div class="news-item">
-      <div><div class="news-title">${escapeHtml(article.title || "News update")}</div><div class="news-source">${escapeHtml(article.source || article.publisher || "News")} · ${escapeHtml(article.published_at || "Latest")}</div></div>
+      <div><div class="news-title">${escapeHtml(article.title || "News update")}</div><div class="news-source">${escapeHtml(article.source || article.publisher || "News")} Â· ${escapeHtml(article.published_at || "Latest")}</div></div>
       ${article.image_url || article.urlToImage ? `<img class="news-thumb" src="${escapeHtml(article.image_url || article.urlToImage)}" alt="">` : `<div class="news-thumb"></div>`}
     </div>
   `).join("")
   setDynamicPanel("news-card", `
     <h3>Top News</h3>
     ${rows || `<div class="view-more">${escapeHtml(fallback || "No live headlines available yet.")}</div>`}
-    <div class="view-more">View more news ›</div>
+    <div class="view-more">View more news â€º</div>
   `)
 }
 
@@ -2603,6 +2761,17 @@ window.ceaserDesktop?.onStopListening?.((payload = {}) => {
     holdVoiceContext = payload.context || holdVoiceContext
     if (!stopHoldSpeechCommand()) stopVoiceCommand()
   }
+})
+
+window.ceaserDesktop?.onOverlayVisibility?.((payload = {}) => {
+  overlayVisible = payload.visible !== false
+  if (!overlayVisible) {
+    if (inactivityPromptVisible) hideInactivityPrompt()
+    if (!silentBackgroundActive) scheduleInactivityTimer('hidden:' + (payload.reason || 'unknown'))
+    return
+  }
+  markUserActivity('visible:' + (payload.reason || 'unknown'), { force: true })
+  restoreFromSilentBackground(payload.reason || 'overlay_restored')
 })
 
 async function startRightCtrlHoldFromRenderer() {
@@ -2796,7 +2965,11 @@ window.ceaserDesktop?.getAuthStatus?.().then((auth) => {
     if (accountButton) accountButton.textContent = "Account"
     renderIdlePanel()
   }
-}).catch(() => {}).finally(() => maybeShowFirstRunGuide())
+}).catch(() => {}).finally(() => {
+  maybeShowFirstRunGuide()
+  scheduleInactivityTimer("startup")
+})
 
 new ResizeObserver(() => fitOverlay()).observe(appShell)
+
 

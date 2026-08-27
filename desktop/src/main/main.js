@@ -175,6 +175,7 @@ let pendingPkce = null
 let deviceRegistrationPromise = null
 let deviceRegistrationRetryTimer = null
 let deviceRegistrationAttempt = 0
+let overlayVisibilityState = "hidden"
 
 function sendVolumeKey(keyCode, presses = 1) {
   return new Promise((resolve) => {
@@ -500,10 +501,7 @@ async function exchangeDesktopAuthCode(payload = {}) {
 
 function showLinkedOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return
-  const bounds = compactBounds()
-  overlayWindow.setSize(bounds.width, bounds.height)
-  overlayWindow.setPosition(bounds.x, bounds.y)
-  overlayWindow.show()
+  restoreOverlayWindow({ reason: "auth_linked", resize: "compact" })
   overlayWindow.webContents.send("ceaser:auth-linked", { linked: true })
 }
 
@@ -1245,7 +1243,7 @@ function createOverlay() {
     },
   })
   overlayWindow.once("ready-to-show", () => {
-    overlayWindow.show()
+    restoreOverlayWindow({ reason: "ready_to_show", resize: "compact" })
   })
   overlayWindow.webContents.once("did-finish-load", () => {
     overlayReady = true
@@ -1294,12 +1292,8 @@ app.whenReady().then(() => {
     startupLog(`secure_session_startup=${JSON.stringify(result)}`)
     const auth = result?.linked ? result : await validateDesktopSession()
     if (!auth?.linked && overlayWindow && !overlayWindow.isDestroyed()) {
-      const bounds = expandedBounds()
       overlayWindow.setIgnoreMouseEvents(false)
-      overlayWindow.setSize(bounds.width, bounds.height)
-      overlayWindow.setPosition(bounds.x, bounds.y)
-      overlayWindow.show()
-      overlayWindow.focus()
+      restoreOverlayWindow({ reason: "auth_required", resize: "expanded" })
       startupLog("account_connection_overlay_shown")
     }
   })
@@ -1496,25 +1490,12 @@ ipcMain.handle("ceaser:window-is-maximized", async () => {
 })
 
 ipcMain.handle("ceaser:hide-overlay", async (_event, options = {}) => {
-  if (options?.force && overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.hide()
-    return { hidden: true, reason: "explicit_session_end" }
-  }
-  // V1 keeps the companion visible. Idle auto-hide can be restored behind a
-  // product setting later without reintroducing scattered renderer timers.
-  if (overlayWindow && !overlayWindow.isDestroyed() && !overlayWindow.isVisible()) {
-    overlayWindow.showInactive()
-  }
-  return { hidden: false, reason: "overlay_persistent_v1" }
+  const reason = options?.reason || (options?.force ? "explicit_session_end" : "overlay_hidden")
+  return hideOverlayWindow({ reason })
 })
 
 ipcMain.handle("ceaser:show-overlay", async () => {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return
-  const bounds = compactBounds()
-  overlayWindow.setSize(bounds.width, bounds.height)
-  overlayWindow.setPosition(bounds.x, bounds.y)
-  overlayWindow.show()
-  overlayWindow.focus()
+  return restoreOverlayWindow({ reason: "renderer_request", resize: "compact" })
 })
 
 ipcMain.handle("ceaser:overlay-interactive", async (_event, interactive) => {
@@ -1579,6 +1560,42 @@ function expandedBounds() {
   }
 }
 
+function sendOverlayVisibility(visible, reason = "unknown") {
+  overlayVisibilityState = visible ? "visible" : "hidden"
+  if (!overlayWindow || overlayWindow.isDestroyed()) return
+  try {
+    overlayWindow.webContents.send("ceaser:overlay-visibility", { visible, reason })
+  } catch (_error) {
+    // Renderer navigation can race visibility changes.
+  }
+}
+
+function restoreOverlayWindow({ reason = "restore", resize = null } = {}) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return { hidden: false, reason: "overlay_missing" }
+  if (resize === "compact") {
+    const bounds = compactBounds()
+    overlayWindow.setSize(bounds.width, bounds.height)
+    overlayWindow.setPosition(bounds.x, bounds.y)
+  } else if (resize === "expanded") {
+    const bounds = expandedBounds()
+    overlayWindow.setSize(bounds.width, bounds.height)
+    overlayWindow.setPosition(bounds.x, bounds.y)
+  }
+  overlayWindow.show()
+  overlayWindow.focus()
+  overlayWindow.moveTop()
+  overlayWindow.webContents.focus()
+  sendOverlayVisibility(true, reason)
+  return { hidden: false, reason }
+}
+
+function hideOverlayWindow({ reason = "overlay_hidden" } = {}) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return { hidden: false, reason: "overlay_missing" }
+  overlayWindow.hide()
+  sendOverlayVisibility(false, reason)
+  return { hidden: true, reason }
+}
+
 function createTray() {
   const iconPath = fs.existsSync(path.join(process.resourcesPath || "", "favicon-64.png"))
     ? path.join(process.resourcesPath, "favicon-64.png")
@@ -1588,17 +1605,7 @@ function createTray() {
   tray.setToolTip("CEASER OS")
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "Open CEASER", click: () => {
-        const appUrl = resolveAppUrl({ getEnv })
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          if (mainWindow.isMinimized()) mainWindow.restore()
-          mainWindow.show()
-          mainWindow.focus()
-          mainWindow.loadURL(appUrl)
-          return
-        }
-        shell.openExternal(appUrl)
-      } },
+      { label: "Open CEASER", click: () => restoreOverlayWindow({ reason: "tray_open" }) },
       { label: "Show Overlay", click: summonListeningOverlay },
       { label: "Connect CEASER Account", click: async () => {
         const appUrl = consoleAppUrl().replace(/\/$/, "")
@@ -1634,7 +1641,7 @@ function createTray() {
       },
     ]),
   )
-  tray.on("click", summonListeningOverlay)
+  tray.on("click", () => restoreOverlayWindow({ reason: "tray_click" }))
 }
 
 function positionTopCenter(width = 292, height = 164) {
@@ -1646,13 +1653,7 @@ function positionTopCenter(width = 292, height = 164) {
 function summonListeningOverlay() {
   if (!overlayWindow) return
   console.log("[CEASER] Wake session hotkey triggered")
-  const bounds = compactBounds()
-  overlayWindow.setSize(bounds.width, bounds.height)
-  overlayWindow.setPosition(bounds.x, bounds.y)
-  overlayWindow.show()
-  overlayWindow.focus()
-  overlayWindow.moveTop()
-  overlayWindow.webContents.focus()
+  restoreOverlayWindow({ reason: "wake_session", resize: "compact" })
   const payload = { mode: "wake_session" }
   if (overlayReady) overlayWindow.webContents.send("ceaser:start-listening", payload)
   else overlayWindow.webContents.once("did-finish-load", () => overlayWindow?.webContents.send("ceaser:start-listening", payload))

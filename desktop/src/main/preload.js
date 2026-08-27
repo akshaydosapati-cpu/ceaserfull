@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer, webUtils } = require("electron")
+﻿const { contextBridge, ipcRenderer, webUtils } = require("electron")
 
 contextBridge.exposeInMainWorld("ceaserDesktop", {
   classify: (payload) => ipcRenderer.invoke("ceaser:classify", payload),
@@ -27,8 +27,8 @@ contextBridge.exposeInMainWorld("ceaserDesktop", {
   duckMedia: (payload) => ipcRenderer.invoke("ceaser:media-duck", payload),
   restoreMedia: () => ipcRenderer.invoke("ceaser:media-restore"),
   openFullApp: () => ipcRenderer.invoke("ceaser:open-full-app"),
-  hideOverlay: () => ipcRenderer.invoke("ceaser:hide-overlay"),
-  showOverlay: () => ipcRenderer.invoke("ceaser:show-overlay"),
+  hideOverlay: (options) => ipcRenderer.invoke("ceaser:hide-overlay", options),
+  showOverlay: (options) => ipcRenderer.invoke("ceaser:show-overlay", options),
   setMode: (mode) => ipcRenderer.invoke("ceaser:set-mode", mode),
   fitContent: (size) => ipcRenderer.invoke("ceaser:fit-content", size),
   setOverlayInteractive: (interactive) => ipcRenderer.invoke("ceaser:overlay-interactive", Boolean(interactive)),
@@ -67,6 +67,11 @@ contextBridge.exposeInMainWorld("ceaserDesktop", {
     ipcRenderer.on("ceaser:system-power", handler)
     return () => ipcRenderer.removeListener("ceaser:system-power", handler)
   },
+  onOverlayVisibility: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on("ceaser:overlay-visibility", handler)
+    return () => ipcRenderer.removeListener("ceaser:overlay-visibility", handler)
+  },
   onRuntimeLog: (callback) => {
     const handler = (_event, payload) => callback(payload)
     ipcRenderer.on("ceaser:runtime-log", handler)
@@ -77,3 +82,4 @@ contextBridge.exposeInMainWorld("ceaserDesktop", {
   windowClose: () => ipcRenderer.invoke("ceaser:window-close"),
   windowIsMaximized: () => ipcRenderer.invoke("ceaser:window-is-maximized"),
 })
+

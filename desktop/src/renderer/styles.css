@@ -923,6 +923,23 @@ button.secondary {
   line-height: 1.25;
 }
 
+.inactivity-prompt {
+  align-self: stretch;
+  margin-top: 10px;
+  border-color: rgba(124, 92, 255, 0.4);
+  background: linear-gradient(145deg, rgba(16, 18, 40, 0.96), rgba(9, 12, 28, 0.96));
+}
+
+.inactivity-prompt strong {
+  display: block;
+  font-size: 14px;
+}
+
+.inactivity-prompt p {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
 .dynamic-panel {
   min-height: 160px;
   overflow: hidden;
