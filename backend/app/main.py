@@ -40,6 +40,7 @@ from app.api.workflows.routes import router as workflows_router
 from app.core.config.settings import settings
 from app.core.database.session import SessionLocal, begin_database_timing, database_timing, end_database_timing
 from app.intelligence.ai.errors import AIServiceUnavailableError
+from app.intelligence.ai.ai_provider_service import ai_provider_service
 from app.services.automations.automation_worker import automation_worker
 
 
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await automation_worker.stop()
+        await ai_provider_service.llm.aclose()
 
 
 def create_app() -> FastAPI:
@@ -88,6 +90,7 @@ def create_app() -> FastAPI:
         request_id = request.headers.get("x-request-id") or uuid4().hex
         request.state.request_id = request_id
         started = perf_counter()
+        request.state.ceaser_request_received_at = started
         timing_tokens = begin_database_timing()
         try:
             response = await call_next(request)

@@ -12,6 +12,7 @@ import { BrowserTTSProvider } from "@/components/voice/providers"
 import { Activity, ArrowRight, Bot, Clock3, Loader2, Mic, MessageSquare, X } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { CeaserLogo } from "./ceaser-logo"
+import { useApp } from "@/lib/app-context"
 
 type ActivityItem = {
   id: string
@@ -49,6 +50,7 @@ function formatActivityTime(value?: string) {
 }
 
 export function CommandBar() {
+  const { guestDemo } = useApp()
   const [status, setStatus] = useState<VoiceStatus>("idle")
   const [statusMessage, setStatusMessage] = useState("Tap to speak")
   const [isActivityOpen, setIsActivityOpen] = useState(false)
@@ -72,7 +74,7 @@ export function CommandBar() {
 
   useEffect(() => {
     setActivities(readStoredActivity())
-    void voiceApi.getSettings().then(setSettings).catch(() => setSettings(null))
+    if (!guestDemo) void voiceApi.getSettings().then(setSettings).catch(() => setSettings(null))
     if (typeof window === "undefined" || !window.speechSynthesis) return
     const loadVoices = () => setBrowserVoices(new BrowserTTSProvider().getVoices())
     loadVoices()
@@ -81,7 +83,7 @@ export function CommandBar() {
       window.speechSynthesis.onvoiceschanged = null
       stopRecording()
     }
-  }, [])
+  }, [guestDemo])
 
   useEffect(() => {
     const onStartVoice = () => {
@@ -94,6 +96,7 @@ export function CommandBar() {
   async function refreshActivity() {
     setActivityError("")
     setActivities(readStoredActivity())
+    if (guestDemo) return
     try {
       const [chatRecords] = await Promise.all([
         chatApi.listConversations(false).catch(() => []),

@@ -87,20 +87,19 @@ class GeminiFallbackProvider(LLMProvider):
                 write=settings.llm_total_timeout_seconds,
                 pool=settings.llm_total_timeout_seconds,
             )
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, params={"key": settings.gemini_api_key}, json=payload)
-                response.raise_for_status()
-                logger.info("Gemini fallback generation succeeded.")
-                data = response.json()
-                usage = data.get("usageMetadata") or {}
-                logger.info(
-                    "llm_usage provider=gemini model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
-                    model,
-                    usage.get("promptTokenCount"),
-                    usage.get("candidatesTokenCount"),
-                    usage.get("totalTokenCount"),
-                )
-                return data
+            response = await self.http_client.post(url, params={"key": settings.gemini_api_key}, json=payload, timeout=timeout)
+            response.raise_for_status()
+            logger.info("Gemini fallback generation succeeded.")
+            data = response.json()
+            usage = data.get("usageMetadata") or {}
+            logger.info(
+                "llm_usage provider=gemini model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                model,
+                usage.get("promptTokenCount"),
+                usage.get("candidatesTokenCount"),
+                usage.get("totalTokenCount"),
+            )
+            return data
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "Gemini fallback failed: status=%s body=%s",

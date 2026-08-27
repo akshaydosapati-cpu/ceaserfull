@@ -34,5 +34,8 @@ class LLMRegistry:
     def health_snapshot(self) -> dict[str, dict[str, object]]:
         return self.router.snapshot()
 
+    async def aclose(self) -> None:
+        await self.router.aclose()
+
 
 llm_registry = LLMRegistry()

@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 import json
 from collections.abc import AsyncIterator
 from time import perf_counter
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from app.core.rate_limiter import rate_limiter
 from pydantic import BaseModel, Field
@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database.session import SessionLocal, get_db
 from app.core.security.dependencies import get_current_user
-from app.intelligence.ai.sync import generate_text_sync
+from app.intelligence.ai.model_router import request_for_chat
+from app.intelligence.ai.sync import generate_text_sync, stream_text
 from app.models.user import User
 from app.schemas.ceaser import CeaserChatRequest, CeaserChatResponse
 from app.services.audit_service import AuditService
@@ -29,31 +30,64 @@ router = APIRouter(prefix="/ceaser", tags=["ceaser"])
 logger = logging.getLogger(__name__)
 
 
+class CeaserDemoTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
 class CeaserDemoRequest(BaseModel):
     message: str = Field(min_length=1, max_length=14000)
+    recent_turns: list[CeaserDemoTurn] = Field(default_factory=list, max_length=8)
 
 
 class CeaserDemoResponse(BaseModel):
     response: str
     source: str = "live_backend"
+    continuation_count: int = 0
 
 
 @router.post("/demo", response_model=CeaserDemoResponse)
-def ceaser_public_demo(payload: CeaserDemoRequest):
+async def ceaser_public_demo(payload: CeaserDemoRequest):
     instructions = (
         "You are CEASER, an AI operating system product demo. "
         "Generate a concise, polished, useful answer for a public landing-page demo. "
         "Use the provided scenario/context exactly. Do not ask for missing context unless the prompt truly has none. "
         "Do not mention backend, APIs, tokens, providers, or internal implementation. "
-        "Keep the answer structured, specific, and under 350 words."
+        "Keep the answer structured, specific, and appropriately concise. "
+        "Use recent conversation turns to resolve follow-up requests without asking the user to repeat context."
     )
-    response = generate_text_sync(
+    history = "\n".join(f"{turn.role.title()}: {turn.content}" for turn in payload.recent_turns[-6:])
+    input_text = "\n\n".join(part for part in (f"Recent conversation:\n{history}" if history else "", f"Current user request:\n{payload.message}") if part)
+    model_request = request_for_chat(streaming=True, context_size_estimate=max(1, len(input_text) // 4))
+    trace: dict = {}
+    chunks = [chunk async for chunk in stream_text(
         instructions=instructions,
-        input_text=payload.message,
+        input_text=input_text,
         temperature=0.35,
-        max_output_tokens=650,
-    )
-    return CeaserDemoResponse(response=response)
+        max_output_tokens=1200,
+        trace=trace,
+        model_request=model_request,
+    )]
+    response = "".join(chunks)
+    continuation_count = 0
+    if trace.get("finish_reason") in {"length", "max_tokens", "token_limit"} and response:
+        continuation_count = 1
+        continuation_trace: dict = {}
+        continuation_input = (
+            f"Original user request:\n{payload.message}\n\n"
+            f"Tail of answer so far:\n{response[-6000:]}\n\n"
+            "Continue exactly where the answer stopped. Do not repeat earlier content. "
+            "Finish the answer cleanly and output only the continuation."
+        )
+        response += "".join([chunk async for chunk in stream_text(
+            instructions=instructions,
+            input_text=continuation_input,
+            temperature=0.35,
+            max_output_tokens=900,
+            trace=continuation_trace,
+            model_request=model_request,
+        )])
+    return CeaserDemoResponse(response=response, continuation_count=continuation_count)
 
 
 @router.post("/chat", response_model=CeaserChatResponse)
@@ -231,7 +265,7 @@ def _run_chat_background_task(task_id: str, user_id: str, payload: CeaserChatReq
 
 
 @router.post("/chat/stream")
-async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
+async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
     route_entered = perf_counter()
     user_id = user.id
     message = payload.message
@@ -239,14 +273,19 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
     file_ids = list(payload.file_ids)
     request_id = str(uuid.uuid4())
     billing_id = f"chat:{payload.request_id or request_id}"
+    auth_trace = getattr(request.state, "ceaser_auth_trace", {})
+    rate_started = perf_counter()
     request_limit = rate_limiter.check("chat", user_id, limit=10, window_seconds=60)
+    rate_check_ms = round((perf_counter() - rate_started) * 1000, 2)
     if not request_limit.allowed:
         raise HTTPException(
             status_code=429,
             detail={"code": "rate_limited", "message": "You're sending requests pretty quickly. Try again in a few seconds.", "retry_after": request_limit.retry_after},
             headers={"Retry-After": str(request_limit.retry_after)},
         )
+    concurrency_started = perf_counter()
     concurrency_limit = rate_limiter.acquire("chat-generation", user_id, limit=3)
+    concurrency_check_ms = round((perf_counter() - concurrency_started) * 1000, 2)
     if not concurrency_limit.allowed:
         raise HTTPException(
             status_code=429,
@@ -257,7 +296,8 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
     try:
         reserve_started = perf_counter()
         reservation = credits.reserve(user.id, billing_id, "ai_conversation")
-        logger.info("ceaser_stream_stage request_id=%s stage=credits_reserved duration_ms=%.2f", request_id, (perf_counter() - reserve_started) * 1000)
+        credit_reservation_ms = round((perf_counter() - reserve_started) * 1000, 2)
+        logger.info("ceaser_stream_stage request_id=%s stage=credits_reserved duration_ms=%.2f", request_id, credit_reservation_ms)
     except InsufficientCreditsError as exc:
         rate_limiter.release("chat-generation", user_id)
         raise HTTPException(status_code=402, detail="Insufficient CEASER credits.") from exc
@@ -275,7 +315,10 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
         if not conversation_id:
             conversation_started = perf_counter()
             conversation_id = ConversationService(db).create(user_id=user.id).id
-            logger.info("ceaser_stream_stage request_id=%s stage=conversation_created duration_ms=%.2f", request_id, (perf_counter() - conversation_started) * 1000)
+            conversation_lookup_ms = round((perf_counter() - conversation_started) * 1000, 2)
+            logger.info("ceaser_stream_stage request_id=%s stage=conversation_created duration_ms=%.2f", request_id, conversation_lookup_ms)
+        else:
+            conversation_lookup_ms = 0.0
     except Exception:
         db.rollback()
         try:
@@ -283,9 +326,14 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
         finally:
             rate_limiter.release("chat-generation", user_id)
         raise
-    request_received = route_entered
-    logger.info("ceaser_latency request_id=%s route_entry_ms=0 conversation_id=%s", request_id, conversation_id)
+    request_received = getattr(request.state, "ceaser_request_received_at", route_entered)
+    logger.info("ceaser_latency request_id=%s route_entry_ms=%.2f conversation_id=%s", request_id, (route_entered - request_received) * 1000, conversation_id)
     logger.info("ceaser_stream_stage request_id=%s stage=authentication_complete user_id=%s", request_id, user_id)
+    logger.info(
+        "ceaser_stream_baseline request_id=%s phase=pre_stream auth_total_ms=%s auth_remote_ms=%s auth_db_validation_ms=%s auth_cache_hit=%s rate_check_ms=%s concurrency_check_ms=%s credit_reservation_ms=%s conversation_create_ms=%s",
+        request_id, auth_trace.get("total_ms"), auth_trace.get("remote_ms"), auth_trace.get("db_validation_ms"),
+        auth_trace.get("cache_hit"), rate_check_ms, concurrency_check_ms, credit_reservation_ms, conversation_lookup_ms,
+    )
 
     def event(event_type: str, data: dict | str) -> str:
         payload_text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=True)
@@ -294,7 +342,16 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
     async def stream() -> AsyncIterator[str]:
         started = request_received
         stage_marks: dict[str, float] = {"start": started}
-        trace: dict[str, object] = {"request_id": request_id}
+        trace: dict[str, object] = {
+            "request_id": request_id,
+            "auth_total_ms": auth_trace.get("total_ms"),
+            "auth_remote_ms": auth_trace.get("remote_ms"),
+            "auth_db_validation_ms": auth_trace.get("db_validation_ms"),
+            "rate_check_ms": rate_check_ms,
+            "concurrency_check_ms": concurrency_check_ms,
+            "credit_reservation_ms": credit_reservation_ms,
+            "conversation_create_ms": conversation_lookup_ms,
+        }
         first_sse_token_logged = False
         completed_meaningfully = False
         try:
@@ -303,6 +360,7 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
             trace["agent_started_ms"] = round((perf_counter() - started) * 1000, 2)
             logger.info("ceaser_latency request_id=%s agent_started_ms=%s", request_id, trace["agent_started_ms"])
             logger.info("ceaser_stream_stage request_id=%s stage=retrieval_started", request_id)
+            prepare_started = perf_counter()
             prepared = await asyncio.to_thread(
                 orchestrator.prepare_stream_request,
                 user_id=user_id,
@@ -315,6 +373,8 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
                 force_live_web_search=payload.force_live_web_search,
             )
             stage_marks["prepared"] = perf_counter()
+            trace["prepare_stream_request_ms"] = round((stage_marks["prepared"] - prepare_started) * 1000, 2)
+            trace["prepare_stage_timings"] = prepared.get("observability", {}).get("stage_timings", [])
             trace["retrieval_time_ms"] = prepared.get("observability", {}).get("retrieval_time_ms")
             trace["routing_ms"] = prepared.get("observability", {}).get("routing_ms")
             trace["tool_calls_ms"] = prepared.get("observability", {}).get("tool_calls_ms")
@@ -401,6 +461,19 @@ async def ceaser_chat_stream(payload: CeaserChatRequest, user: Annotated[User, D
                         "ceaser_stream_stage request_id=%s stage=first_sse_token endpoint_ttft_ms=%s",
                         request_id,
                         trace["endpoint_ttft_ms"],
+                    )
+                    logger.info(
+                        "ceaser_stream_baseline request_id=%s phase=first_token auth_ms=%s rate_ms=%s concurrency_ms=%s credits_ms=%s conversation_ms=%s prepare_ms=%s intent_ms=%s routing_ms=%s retrieval_ms=%s context_ms=%s model_selection_ms=%s prompt_build_ms=%s provider_connect_ms=%s provider_first_token_ms=%s endpoint_ttft_ms=%s",
+                        request_id, trace.get("auth_total_ms"), trace.get("rate_check_ms"), trace.get("concurrency_check_ms"),
+                        trace.get("credit_reservation_ms"), trace.get("conversation_create_ms"), trace.get("prepare_stream_request_ms"),
+                        prepared.get("observability", {}).get("intent_ms"), trace.get("routing_ms"), trace.get("retrieval_time_ms"),
+                        prepared.get("observability", {}).get("context_build_ms"), trace.get("model_selection_ms"), trace.get("prompt_build_ms"),
+                        trace.get("provider_connect_ms"), trace.get("first_token_ms"), trace.get("endpoint_ttft_ms"),
+                    )
+                    logger.info(
+                        "ceaser_stream_baseline request_id=%s phase=prepare_breakdown stages=%s",
+                        request_id,
+                        json.dumps(trace.get("prepare_stage_timings", []), ensure_ascii=True, separators=(",", ":")),
                     )
                     first_sse_token_logged = True
                     yield event("token", chunk)

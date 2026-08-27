@@ -3,7 +3,7 @@ from time import monotonic
 from threading import Lock
 import logging
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.exc import SQLAlchemyError
 import httpx
 from sqlalchemy.orm import Session
@@ -42,17 +42,23 @@ def _store_cached_supabase_user(access_token: str, user: dict[str, str]) -> None
 
 
 async def get_current_user(
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> User:
     auth_started = monotonic()
+    auth_trace: dict[str, float | str | bool] = {}
+    request.state.ceaser_auth_trace = auth_trace
     logger.info("ceaser_auth_stage stage=auth_started")
     if settings.dev_auth_bypass:
         repo = UserRepository(db)
         try:
+            db_started = monotonic()
             user = repo.get_or_create(email="dev@ceaser.local", user_id="00000000-0000-4000-8000-000000000001")
             db.commit()
             db.refresh(user)
+            auth_trace.update(mode="dev", cache_hit=False, remote_ms=0.0, db_validation_ms=round((monotonic() - db_started) * 1000, 2))
+            auth_trace["total_ms"] = round((monotonic() - auth_started) * 1000, 2)
             logger.info("ceaser_auth_stage stage=auth_complete mode=dev duration_ms=%.2f", (monotonic() - auth_started) * 1000)
             return user
         except (SQLAlchemyError, Exception) as exc:
@@ -65,6 +71,7 @@ async def get_current_user(
     token = authorization.split(" ", 1)[1]
     desktop_payload = verify_desktop_access_token(token)
     if desktop_payload:
+        db_started = monotonic()
         user = db.get(User, desktop_payload.get("sub"))
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid desktop session")
@@ -73,6 +80,8 @@ async def get_current_user(
             device = db.query(DesktopDevice).filter(DesktopDevice.user_id == user.id, DesktopDevice.device_id == device_id).first()
             if device and device.revoked_at:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Desktop device revoked")
+        auth_trace.update(mode="desktop", cache_hit=False, remote_ms=0.0, db_validation_ms=round((monotonic() - db_started) * 1000, 2))
+        auth_trace["total_ms"] = round((monotonic() - auth_started) * 1000, 2)
         logger.info("ceaser_auth_stage stage=auth_complete mode=desktop duration_ms=%.2f", (monotonic() - auth_started) * 1000)
         return user
     try:
@@ -82,8 +91,10 @@ async def get_current_user(
             supabase_user = await supabase_auth.get_user(token)
             _store_cached_supabase_user(token, {"email": supabase_user.get("email") or "", "id": supabase_user.get("id") or ""})
             logger.info("ceaser_auth_stage stage=supabase_remote duration_ms=%.2f", (monotonic() - remote_started) * 1000)
+            auth_trace.update(cache_hit=False, remote_ms=round((monotonic() - remote_started) * 1000, 2))
         else:
             logger.info("ceaser_auth_stage stage=supabase_cache_hit")
+            auth_trace.update(cache_hit=True, remote_ms=0.0)
     except httpx.RequestError as exc:
         logger.warning("ceaser_auth_stage stage=supabase_unavailable error=%s", exc.__class__.__name__)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication service temporarily unavailable") from exc
@@ -97,9 +108,12 @@ async def get_current_user(
 
     repo = UserRepository(db)
     try:
+        db_started = monotonic()
         user = repo.get_or_create(email=email, user_id=user_id)
         db.commit()
         db.refresh(user)
+        auth_trace.update(mode="supabase", db_validation_ms=round((monotonic() - db_started) * 1000, 2))
+        auth_trace["total_ms"] = round((monotonic() - auth_started) * 1000, 2)
         logger.info("ceaser_auth_stage stage=auth_complete mode=supabase duration_ms=%.2f", (monotonic() - auth_started) * 1000)
         return user
     except (SQLAlchemyError, Exception) as exc:

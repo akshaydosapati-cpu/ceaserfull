@@ -1,9 +1,10 @@
-﻿"use client"
+"use client"
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { authApi, type AuthSession } from "@/lib/api/auth"
 import { adminApi } from "@/lib/api/admin"
-import { ApiError, clearAuthTokens, getAccessToken, recordStartupMetric } from "@/lib/api/client"
+import { ApiError, getAccessToken, recordStartupMetric } from "@/lib/api/client"
+import { clearConsoleSessionState } from "@/lib/session"
 import { CeaserSelect } from "./ceaser-select"
 import { CeaserLogo } from "./ceaser-logo"
 import { SystemStatusCard } from "./system-status-card"
@@ -22,13 +23,17 @@ type AuthStatus = "unknown" | "no_session" | "verifying" | "authenticated" | "un
 const useCases = ["Student", "Professional", "Founder", "Creator", "Developer"]
 
 export function WelcomeGate({ children }: { children: ReactNode }) {
-  const { setCurrentPage } = useApp()
+  const { setCurrentPage, guestDemo } = useApp()
   const [isChecking, setIsChecking] = useState(true)
   const [authStatus, setAuthStatus] = useState<AuthStatus>("unknown")
   const [session, setSession] = useState<AuthSession | null>(null)
   const [onboardingComplete, setOnboardingComplete] = useState(false)
   const [step, setStep] = useState<Step>("welcome")
-  const [authMode, setAuthMode] = useState<AuthMode>("login")
+  const [authMode, setAuthMode] = useState<AuthMode>(() => {
+    if (typeof window === "undefined") return "login"
+    const mode = new URLSearchParams(window.location.search).get("mode") || new URLSearchParams(window.location.search).get("auth")
+    return mode === "signup" ? "signup" : "login"
+  })
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [passwordVisible, setPasswordVisible] = useState(false)
@@ -54,6 +59,10 @@ export function WelcomeGate({ children }: { children: ReactNode }) {
   const [selectedVoice, setSelectedVoice] = useState("")
 
   useEffect(() => {
+    if (guestDemo) {
+      setIsChecking(false)
+      return
+    }
     let mounted = true
     const safetyTimer = window.setTimeout(() => {
       if (!mounted) return
@@ -72,14 +81,18 @@ export function WelcomeGate({ children }: { children: ReactNode }) {
       } catch (error) {
         if (mounted) setMessage(error instanceof Error ? cleanAuthMessage(error.message) : "Google sign-in could not continue.")
       }
-      const token = getAccessToken()
-      if (!token) {
-        if (mounted) {
-          setAuthStatus("no_session")
-          setIsChecking(false)
-        }
-        return
-      }
+const token = getAccessToken()
+if (!token) {
+  if (mounted && !guestDemo) {
+    window.location.replace("/")
+    return
+  }
+  if (mounted) {
+    setAuthStatus("no_session")
+    setIsChecking(false)
+  }
+  return
+}
       setAuthStatus("verifying")
       recordStartupMetric("auth_verify_start")
       try {
@@ -129,19 +142,19 @@ export function WelcomeGate({ children }: { children: ReactNode }) {
       mounted = false
       window.clearTimeout(safetyTimer)
     }
-  }, [])
+  }, [guestDemo])
 
-  useEffect(() => {
-    const onSessionExpired = () => {
-      clearAuthTokens()
-      setSession(null)
-      setOnboardingComplete(false)
-      setStep("auth")
-      setMessage("Your session expired. Please sign in again.")
-    }
-    window.addEventListener("ceaser:session-expired", onSessionExpired)
-    return () => window.removeEventListener("ceaser:session-expired", onSessionExpired)
-  }, [])
+useEffect(() => {
+  const onSessionExpired = () => {
+    clearConsoleSessionState()
+    setSession(null)
+    setOnboardingComplete(false)
+    setMessage("Your session expired. Please sign in again.")
+    window.location.replace("/")
+  }
+  window.addEventListener("ceaser:session-expired", onSessionExpired)
+  return () => window.removeEventListener("ceaser:session-expired", onSessionExpired)
+}, [])
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.speechSynthesis) return
@@ -181,6 +194,8 @@ export function WelcomeGate({ children }: { children: ReactNode }) {
     const stored = readProfile()
     return stored?.name || name || sessionEmail(session)?.split("@")[0] || "there"
   }, [name, session])
+
+  if (guestDemo) return <>{children}</>
 
   if (canOptimisticallyRender) return <>{children}</>
 

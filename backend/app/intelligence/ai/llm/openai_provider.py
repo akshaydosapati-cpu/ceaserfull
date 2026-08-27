@@ -101,25 +101,25 @@ class OpenAIProvider(LLMProvider):
             "stream": True,
         }
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                connect_started = time.perf_counter()
-                async with client.stream(
+            connect_started = time.perf_counter()
+            async with self.http_client.stream(
                     "POST",
                     self.endpoint,
                     headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                     json=payload,
+                    timeout=timeout,
                 ) as response:
-                    response.raise_for_status()
-                    if trace is not None:
-                        trace["provider_connect_ms"] = round((time.perf_counter() - connect_started) * 1000, 2)
-                        if "request_id" in trace:
-                            logger.info(
+                response.raise_for_status()
+                if trace is not None:
+                    trace["provider_connect_ms"] = round((time.perf_counter() - connect_started) * 1000, 2)
+                    if "request_id" in trace:
+                        logger.info(
                                 "ceaser_stream_stage request_id=%s stage=provider_connected provider=openai model=%s provider_connect_ms=%s",
                                 trace["request_id"],
                                 model or settings.openai_model,
                                 trace["provider_connect_ms"],
-                            )
-                    async for line in response.aiter_lines():
+                        )
+                async for line in response.aiter_lines():
                         if not line or not line.startswith("data: "):
                             continue
                         data = line[6:].strip()
@@ -179,23 +179,23 @@ class OpenAIProvider(LLMProvider):
         if response_format:
             payload["response_format"] = response_format
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
+            response = await self.http_client.post(
                     self.endpoint,
                     headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                     json=payload,
+                    timeout=timeout,
                 )
-                response.raise_for_status()
-                data = response.json()
-                usage = data.get("usage") or {}
-                logger.info(
+            response.raise_for_status()
+            data = response.json()
+            usage = data.get("usage") or {}
+            logger.info(
                     "llm_usage provider=openai model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
                     model,
                     usage.get("prompt_tokens"),
                     usage.get("completion_tokens"),
                     usage.get("total_tokens"),
-                )
-                return data
+            )
+            return data
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429 and "insufficient_quota" in exc.response.text:
                 _quota_blocked_until = time.time() + 600
@@ -235,28 +235,28 @@ class OpenAIProvider(LLMProvider):
             "max_output_tokens": max_output_tokens,
         }
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                started = time.perf_counter()
-                response = await client.post(
+            started = time.perf_counter()
+            response = await self.http_client.post(
                     self.responses_endpoint,
                     headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
                     json=payload,
+                    timeout=timeout,
                 )
-                response.raise_for_status()
-                if trace is not None:
-                    trace["provider_connect_ms"] = round((time.perf_counter() - started) * 1000, 2)
-                    trace["model"] = settings.openai_web_search_model
-                    trace["web_search_used"] = True
-                data = response.json()
-                usage = data.get("usage") or {}
-                logger.info(
+            response.raise_for_status()
+            if trace is not None:
+                trace["provider_connect_ms"] = round((time.perf_counter() - started) * 1000, 2)
+                trace["model"] = settings.openai_web_search_model
+                trace["web_search_used"] = True
+            data = response.json()
+            usage = data.get("usage") or {}
+            logger.info(
                     "llm_usage provider=openai_web_search model=%s input_tokens=%s output_tokens=%s total_tokens=%s",
                     settings.openai_web_search_model,
                     usage.get("input_tokens"),
                     usage.get("output_tokens"),
                     usage.get("total_tokens"),
-                )
-                return self._extract_responses_text(data)
+            )
+            return self._extract_responses_text(data)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429 and "insufficient_quota" in exc.response.text:
                 _quota_blocked_until = time.time() + 600

@@ -16,11 +16,12 @@ import { trackEvent } from "@/lib/analytics"
 
 interface AppLayoutProps {
   children: ReactNode
+  guestDemo?: boolean
 }
 
-export function AppLayout({ children }: AppLayoutProps) {
+export function AppLayout({ children, guestDemo = false }: AppLayoutProps) {
   return (
-    <AppProvider>
+    <AppProvider guestDemo={guestDemo}>
       <WelcomeGate>
         <AppHotkeyBridge />
         <ButtonInteractionFeedback />

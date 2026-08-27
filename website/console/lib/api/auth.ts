@@ -1,5 +1,6 @@
 import { apiRequest } from "./client"
 import { clearAuthTokens, setAuthTokens } from "./client"
+import { clearConsoleSessionState } from "@/lib/session"
 
 const DESKTOP_AUTH_RETURN_KEY = "ceaser_desktop_auth_return"
 
@@ -103,9 +104,9 @@ export const authApi = {
   updateProfile: (display_name: string, details: Record<string, unknown> = {}) =>
     apiRequest<AuthSession>("/auth/profile", { method: "PATCH", body: { display_name, ...details } }),
   signOut: async () => {
-    await apiRequest<void>("/auth/sign-out", { method: "POST" })
-    clearAuthTokens()
-  },
+  await apiRequest<void>("/auth/sign-out", { method: "POST" })
+  clearConsoleSessionState()
+},
   recoverPassword: (email: string, redirect_to?: string) =>
     apiRequest<{ status: string; message: string }>("/auth/password/recover", {
       method: "POST",

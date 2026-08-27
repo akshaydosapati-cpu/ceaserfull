@@ -111,48 +111,151 @@
   </section>
 
   <section class="section" id="experience">
-    <div class="container">
+    <div class="container guest-stage">
       <div class="section-head reveal">
         <span class="eyebrow">Try CEASER</span>
+        <!-- Legacy guest mock removed from rendering.
         <h2>One place to explore what CEASER can do.</h2>
-        <p>Switch between real product moments. Each tab shows how CEASER understands, plans, and turns intent into an outcome.</p>
+        <p>Open the real CEASER chat workspace in guest mode. The chat is live, but private modules stay locked until you sign in.</p>
       </div>
-      <div class="try-lab reveal" data-feature-lab>
-        <div class="try-tabs" role="tablist" aria-label="CEASER feature demos">
-          <button type="button" class="active" data-feature-tab="voice"><span class="tab-icon">AI</span>Ask</button>
-          <button type="button" data-feature-tab="capture"><span class="tab-icon">SC</span>Analyze</button>
-          <button type="button" data-feature-tab="create"><span class="tab-icon">CR</span>Create</button>
-          <button type="button" data-feature-tab="control"><span class="tab-icon">PC</span>Desktop</button>
-          <button type="button" data-feature-tab="workflow"><span class="tab-icon">WF</span>Workflow</button>
-        </div>
-        <div class="try-stage">
-          <div class="try-copy">
-            <span class="eyebrow" data-feature-label>Ask CEASER</span>
-            <h3 data-feature-title>Try browser-ready intelligence.</h3>
-            <p data-feature-body>Choose a prepared command and CEASER will generate a useful response in the browser experience.</p>
-            <div class="try-command-list" data-feature-prompts></div>
-            <form class="try-runner" data-try-runner>
-              <button type="button" class="try-mic" data-try-mic aria-label="Run selected command"></button>
-              <div class="try-selected" data-feature-prompt>Hey CEASER, open Chrome and search AI news</div>
-              <button type="submit" class="btn btn-primary btn-sm">Generate</button>
-            </form>
-            <input type="file" data-capture-file hidden accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx,.xlsx,.txt,.md,.csv">
-            <p class="try-note">Custom prompts and real desktop control are available after sign-in with the CEASER console and Desktop Companion.</p>
-          </div>
-          <div class="try-motion" data-feature-visual>
-            <div class="try-orb"></div>
-            <div class="try-lines" data-feature-steps>
-              <span>Listening</span>
-              <span>Understanding</span>
-              <span>Executing</span>
+      <div class="guest-lab reveal" data-guest-workspace data-is-guest="true">
+        <div class="guest-shell">
+          <aside class="guest-sidebar" aria-label="Guest workspace navigation">
+            <div class="guest-sidebar-brand">
+              <span class="brand-mark" aria-hidden="true"></span>
+              <div>
+                <strong>CEASER</strong>
+                <span>Guest workspace</span>
+              </div>
             </div>
-            <div class="try-result" data-feature-result>Chrome opened with the latest AI news search.</div>
-          </div>
+            <button type="button" class="guest-search" data-guest-locked data-locked-label="Search chats">
+              <span>Search chats...</span>
+            </button>
+            <nav class="guest-nav" aria-label="Guest navigation">
+              <button type="button" class="guest-nav-item active">
+                <span class="guest-nav-icon">+</span>
+                <span>New chat</span>
+              </button>
+              <button type="button" class="guest-nav-item" data-guest-locked data-locked-label="Library">
+                <span class="guest-nav-icon">B</span>
+                <span>Library</span>
+                <span class="guest-lock-tag">Locked</span>
+              </button>
+              <button type="button" class="guest-nav-item" data-guest-locked data-locked-label="Projects">
+                <span class="guest-nav-icon">P</span>
+                <span>Projects</span>
+                <span class="guest-lock-tag">Locked</span>
+              </button>
+              <button type="button" class="guest-nav-item" data-guest-locked data-locked-label="Plugins">
+                <span class="guest-nav-icon">*</span>
+                <span>Plugins</span>
+                <span class="guest-lock-tag">Locked</span>
+              </button>
+              <button type="button" class="guest-nav-item" data-guest-locked data-locked-label="More">
+                <span class="guest-nav-icon">...</span>
+                <span>More</span>
+                <span class="guest-lock-tag">Locked</span>
+              </button>
+            </nav>
+            <div class="guest-sidebar-section">
+              <p class="guest-sidebar-label">Chats</p>
+              <button type="button" class="guest-chat-link active" data-guest-new-chat>
+                <span>Guest session</span>
+                <small>Live this visit</small>
+              </button>
+            </div>
+            <div class="guest-profile-card">
+              <button type="button" class="guest-profile-trigger guest-profile-trigger-sidebar" data-guest-profile-button aria-haspopup="menu" aria-expanded="false">
+                <span class="guest-avatar" aria-hidden="true">G</span>
+                <span class="guest-profile-copy">
+                  <strong>Guest</strong>
+                  <span>Guest mode</span>
+                </span>
+              </button>
+            </div>
+          </aside>
+          <main class="guest-main">
+            <div class="guest-main-top">
+              <div class="guest-main-brand">
+                <span class="eyebrow">CEASER</span>
+                <p class="guest-main-subtitle">Stable guest experience with the live chat engine.</p>
+              </div>
+              <div class="guest-profile-wrap">
+                <button type="button" class="guest-profile-trigger" data-guest-profile-button aria-haspopup="menu" aria-expanded="false">
+                  <span class="guest-avatar" aria-hidden="true">G</span>
+                  <span class="guest-profile-copy">
+                    <strong>Guest</strong>
+                    <span>Session only</span>
+                  </span>
+                </button>
+                <div class="guest-popover" data-guest-profile-popover hidden role="menu" aria-label="Guest account menu">
+                  <p class="guest-popover-title">Guest</p>
+                  <p class="guest-popover-copy">You're using CEASER as a guest. Create an account or sign in to unlock your personal workspace.</p>
+                  <div class="guest-popover-actions">
+                    <a class="btn btn-primary btn-sm" href="/console/?mode=signup">Create Account</a>
+                    <a class="btn btn-ghost btn-sm" href="/console/?mode=login">Sign In</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="guest-lock-banner" data-guest-lock-banner hidden>
+              <div>
+                <p class="guest-lock-kicker" data-guest-lock-source>Locked feature</p>
+                <p class="guest-lock-copy" data-guest-lock-copy>Create your CEASER account to unlock this.</p>
+              </div>
+              <div class="guest-lock-actions">
+                <a class="btn btn-primary btn-sm" href="/console/?mode=signup">Create Account</a>
+                <a class="btn btn-ghost btn-sm" href="/console/?mode=login">Sign In</a>
+              </div>
+            </div>
+            <section class="guest-hero">
+              <p class="guest-greeting"><span data-guest-greeting>Good morning, Guest</span></p>
+              <h3>What would you like to create?</h3>
+              <p>Ask CEASER anything public, keep the conversation going, and sign in only when you want private features like library, projects, plugins, and settings.</p>
+            </section>
+            <section class="guest-composer-panel">
+              <form class="guest-composer-card" data-guest-form>
+                <input data-guest-input type="text" placeholder="Ask anything or give a command..." aria-label="Ask CEASER" autocomplete="off" />
+                <div class="guest-composer-row">
+                  <button type="button" class="guest-chip">Auto</button>
+                  <button type="button" class="guest-chip guest-chip-lock" data-guest-locked data-locked-label="Add more tools">+</button>
+                  <button type="submit" class="guest-send-btn" aria-label="Send message">Send</button>
+                </div>
+              </form>
+            </section>
+            <section class="guest-agents">
+              <div class="guest-section-head">
+                <h4>Your Agents</h4>
+                <span>Guest view</span>
+              </div>
+              <div class="guest-agent-grid">
+                <article class="guest-agent-card"><span>Q</span><div><strong>Researcher</strong><p>Find &amp; analyze information</p></div></article>
+                <article class="guest-agent-card"><span>P</span><div><strong>Writer</strong><p>Write content &amp; copy</p></div></article>
+                <article class="guest-agent-card"><span>A</span><div><strong>Analyst</strong><p>Analyze data &amp; trends</p></div></article>
+                <article class="guest-agent-card"><span>&lt;/&gt;</span><div><strong>Developer</strong><p>Code &amp; build</p></div></article>
+                <article class="guest-agent-card"><span>D</span><div><strong>Designer</strong><p>Design &amp; creative</p></div></article>
+              </div>
+            </section>
+            <div class="guest-suggestions">
+              <button type="button" data-guest-suggestion="Explain quantum computing in simple terms.">Explain Quantum Computing</button>
+              <button type="button" data-guest-suggestion="Summarize the Ramayana for a beginner.">Summarize the Ramayana</button>
+              <button type="button" data-guest-suggestion="Create a practical weekly study plan for an exam.">Weekly Study Plan</button>
+              <button type="button" data-guest-suggestion="Write a professional leave request email.">Leave Request Email</button>
+            </div>
+            <div class="guest-thread" data-guest-thread aria-live="polite" aria-busy="false"></div>
+            <p class="guest-cta-note">Want more than guest chat? <a href="/console/?mode=signup">Create your free CEASER account</a> to unlock your personal AI workspace.</p>
+          </main>
         </div>
+        -->
+        <h2>Meet CEASER in the real console.</h2>
+        <p>Chat as a guest inside the actual CEASER experience. Sign in when you are ready to unlock your library, projects, plugins, and settings.</p>
+      </div>
+      <div class="console-demo-frame reveal">
+        <div class="console-demo-bar"><span></span><span></span><span></span><strong>Guest preview</strong></div>
+        <iframe src="/console/guest-demo/" title="Try the CEASER console as Guest" loading="lazy" allow="clipboard-write"></iframe>
       </div>
     </div>
   </section>
-
   <section class="section" id="features">
     <div class="container">
       <div class="section-head reveal">
@@ -276,7 +379,7 @@
     </div>
   </section>
 
-  <section class="section" id="pricing">
+  <section class="section" id="pricing" data-feature="pricing">
     <div class="container">
       <div class="section-head reveal">
         <span class="eyebrow">Pricing</span>

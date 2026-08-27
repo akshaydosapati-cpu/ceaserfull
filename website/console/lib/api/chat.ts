@@ -145,6 +145,11 @@ export interface ChatRequestOptions {
 }
 
 export const chatApi = {
+  sendGuestDemoMessage: (message: string, recentTurns: Array<{ role: "user" | "assistant"; content: string }> = []) =>
+    apiRequest<{ response: string; source: string; continuation_count: number }>("/ceaser/demo", {
+      method: "POST",
+      body: { message, recent_turns: recentTurns.slice(-6) },
+    }),
   listConversations: (archived = false) => {
     const params = new URLSearchParams()
     if (archived) params.set("archived", "true")

@@ -77,7 +77,11 @@ async def stream_text(
 
     last_error: Exception | None = None
     request = model_request or request_for_chat(streaming=True, context_size_estimate=max(1, len(input_text) // 4))
+    model_selection_started = perf_counter()
     attempts = ai_provider_service.llm.model_candidates(request, max_count=max(1, settings.llm_max_fallbacks + 1))
+    model_selection_ms = round((perf_counter() - model_selection_started) * 1000, 2)
+    if trace is not None:
+        trace["model_selection_ms"] = model_selection_ms
     if not attempts:
         raise AIServiceUnavailableError("No LLM provider is configured.", retryable=False, category="configuration")
 
@@ -94,6 +98,7 @@ async def stream_text(
                 trace["fallback_provider"] = provider_name if index > 0 else None
                 trace["provider_attempt"] = index + 1
                 trace.setdefault("failed_attempts", [])
+                trace["provider_request_started_ms"] = round((perf_counter() - model_selection_started) * 1000, 2)
                 if index > 0 and "fallback_from" not in trace and trace["failed_attempts"]:
                     trace["fallback_from"] = trace["failed_attempts"][0].get("provider")
                     trace["fallback_reason"] = trace["failed_attempts"][0].get("detail")

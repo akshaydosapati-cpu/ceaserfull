@@ -89,7 +89,7 @@ class GroqProvider(LLMProvider):
                 write=settings.llm_total_timeout_seconds,
                 pool=settings.llm_total_timeout_seconds,
             )
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with self.http_session(timeout=timeout) as client:
                 connect_started = perf_counter()
                 if trace is not None:
                     trace["stream_opened"] = False
@@ -100,7 +100,7 @@ class GroqProvider(LLMProvider):
                     "POST",
                     self.endpoint,
                     headers={"Authorization": f"Bearer {settings.groq_api_key}"},
-                    json=payload,
+                    json=payload, timeout=timeout,
                 ) as response:
                     if response.status_code >= 400:
                         error_body = (await response.aread()).decode("utf-8", errors="replace")
@@ -195,11 +195,11 @@ class GroqProvider(LLMProvider):
                 write=settings.llm_total_timeout_seconds,
                 pool=settings.llm_total_timeout_seconds,
             )
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with self.http_session(timeout=timeout) as client:
                 response = await client.post(
                     self.endpoint,
                     headers={"Authorization": f"Bearer {settings.groq_api_key}"},
-                    json=payload,
+                    json=payload, timeout=timeout,
                 )
                 response.raise_for_status()
                 return response.json()

@@ -50,6 +50,12 @@ class ModelRouter:
             self._providers[provider_id] = provider
         return provider
 
+    async def aclose(self) -> None:
+        for provider in list(self._providers.values()):
+            close = getattr(provider, "aclose", None)
+            if close is not None:
+                await close()
+
     async def generate(self, request: ModelRequest, *, instructions: str, input_text: str, max_output_tokens: int | None = None) -> ModelResponse:
         attempts = self.model_candidates(request, max_count=max(1, settings.llm_max_fallbacks + 1))
         last_error: AIServiceUnavailableError | None = None

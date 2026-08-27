@@ -58,11 +58,11 @@ class NvidiaProvider(LLMProvider):
         if trace is not None:
             trace.update(stream_opened=False, stream_completed=False, stream_cancelled=False, stream_error_type=None)
         try:
-            async with httpx.AsyncClient(timeout=self._stream_timeout()) as client:
+            async with self.http_session(timeout=self._stream_timeout()) as client:
                 started = perf_counter()
                 async with client.stream(
                     "POST", self._endpoint(), headers=self._headers(),
-                    json=self._payload(model_name, instructions, input_text, max_output_tokens or settings.openai_max_tokens, True),
+                    json=self._payload(model_name, instructions, input_text, max_output_tokens or settings.openai_max_tokens, True), timeout=self._stream_timeout(),
                 ) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", errors="replace")
@@ -132,10 +132,10 @@ class NvidiaProvider(LLMProvider):
 
     async def _post(self, *, model: str, instructions: str, input_text: str, temperature: float, max_tokens: int) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout()) as client:
+            async with self.http_session(timeout=self._timeout()) as client:
                 response = await client.post(
                     self._endpoint(), headers=self._headers(),
-                    json=self._payload(model, instructions, input_text, max_tokens, False, temperature),
+                    json=self._payload(model, instructions, input_text, max_tokens, False, temperature), timeout=self._timeout(),
                 )
                 if response.status_code >= 400:
                     raise self._status_error(response.status_code, response.text, model)

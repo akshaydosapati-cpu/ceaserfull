@@ -27,6 +27,7 @@ type DialogRequest =
     }
 
 interface AppState {
+  guestDemo: boolean
   currentPage: AppPage
   setCurrentPage: (page: AppPage) => void
   selectedAgentId: string | null
@@ -52,7 +53,7 @@ interface AppState {
 
 const AppContext = createContext<AppState | undefined>(undefined)
 
-export function AppProvider({ children }: { children: ReactNode }) {
+export function AppProvider({ children, guestDemo = false }: { children: ReactNode; guestDemo?: boolean }) {
   const [currentPage, setCurrentPage] = useState<AppPage>("chat")
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false)
@@ -122,6 +123,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   return (
     <AppContext.Provider
       value={{
+        guestDemo,
         currentPage,
         setCurrentPage: setPage,
         selectedAgentId,

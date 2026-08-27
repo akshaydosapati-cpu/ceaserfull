@@ -84,13 +84,14 @@ class HuggingFaceProvider(LLMProvider):
         )
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout(streaming=True)) as client:
+            timeout = self._timeout(streaming=True)
+            async with self.http_session(timeout=timeout) as client:
                 connect_started = perf_counter()
                 async with client.stream(
                     "POST",
                     endpoint,
                     headers=self._headers(),
-                    json=payload,
+                    json=payload, timeout=timeout,
                 ) as response:
                     if response.status_code >= 400:
                         error_body = (await response.aread()).decode("utf-8", errors="replace")
@@ -165,7 +166,7 @@ class HuggingFaceProvider(LLMProvider):
         endpoint = self._endpoint_url()
         hostname = urlparse(endpoint).hostname or "<invalid-host>"
         try:
-            async with httpx.AsyncClient(timeout=self._timeout(streaming=False)) as client:
+            async with self.http_session(timeout=self._timeout(streaming=False)) as client:
                 response = await client.post(
                     endpoint,
                     headers=self._headers(),
@@ -176,7 +177,7 @@ class HuggingFaceProvider(LLMProvider):
                         temperature=temperature,
                         max_tokens=max_tokens,
                         stream=stream,
-                    ),
+                    ), timeout=self._timeout(streaming=False),
                 )
                 if response.status_code >= 400:
                     raise self._status_error(
