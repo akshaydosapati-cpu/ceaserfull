@@ -270,11 +270,7 @@ function scheduleInactivityTimer(reason = "activity") {
 
 function handleInactivityTimeout(reason = "timer") {
   if (silentBackgroundActive) return
-  if (!overlayVisible) {
-    enterSilentBackground(reason)
-    return
-  }
-  showInactivityPrompt()
+  enterSilentBackground(reason)
 }
 
 function markUserActivity(reason = "interaction", { force = false } = {}) {
@@ -1119,11 +1115,14 @@ function speak(text, onend) {
   const generation = speechGeneration
   currentSpeechOnEnd = typeof onend === "function" ? onend : null
   let finished = false
+  let providerTimeout = null
+  let providerFallbackStarted = false
   speakingActive = true
   window.ceaserDesktop?.pythonVoiceCommand?.({ type: "voice_playback", state: "speaking", spoken_response: text }).catch(() => {})
   const finish = () => {
     if (finished) return
     finished = true
+    window.clearTimeout(providerTimeout)
     currentProviderAudio = null
     speakingActive = false
     window.ceaserDesktop?.pythonVoiceCommand?.({ type: "voice_playback", state: "finished" }).catch(() => {})
@@ -1151,9 +1150,16 @@ function speak(text, onend) {
     window.speechSynthesis.speak(utterance)
   }
 
+  providerTimeout = window.setTimeout(() => {
+    if (finished || generation !== speechGeneration || currentProviderAudio) return
+    providerFallbackStarted = true
+    console.warn("[CEASER Voice] tts_fallback provider=system reason=provider_timeout")
+    speakWithSystem()
+  }, 8000)
   window.ceaserDesktop?.pythonVoiceCommand?.({ type: "synthesize_speech", text })
     .then((response) => {
-      if (generation !== speechGeneration) return
+      if (generation !== speechGeneration || finished || providerFallbackStarted || currentProviderAudio) return
+      window.clearTimeout(providerTimeout)
       if (response?.status !== "completed" || !response?.audio_base64) {
         console.log(`[CEASER Voice] tts_fallback provider=${response?.provider || "system"} reason=${response?.reason || "unavailable"}`)
         speakWithSystem()
@@ -1172,7 +1178,13 @@ function speak(text, onend) {
       })
       console.log(`[CEASER Voice] tts_provider=elevenlabs first_audio_ms=${response.first_audio_ms || 0} total_ms=${response.total_ms || 0}`)
     })
-    .catch(speakWithSystem)
+    .catch(() => {
+      window.clearTimeout(providerTimeout)
+      if (!finished && !providerFallbackStarted) {
+        providerFallbackStarted = true
+        speakWithSystem()
+      }
+    })
 }
 
 function compactLogText(value, limit = 260) {
@@ -1767,7 +1779,7 @@ async function handleVoiceTranscript(command, options = {}) {
       holdVoiceSessionId = null
       holdVoiceContext = null
       setState("idle", "I did not catch that", "Say Hey CEASER and try again.")
-      window.setTimeout(() => window.ceaserDesktop?.hideOverlay?.(), 1000)
+      afterAssistantTurn()
       return
     }
     commandInput.value = cleaned
@@ -1780,7 +1792,7 @@ async function handleVoiceTranscript(command, options = {}) {
   if (!cleaned) {
     if (options.singleCommand) {
       setState("idle", "I did not catch that", "Say Hey CEASER and try again.")
-      window.setTimeout(() => window.ceaserDesktop?.hideOverlay?.(), 1200)
+      afterAssistantTurn()
       return
     }
     if (options.requireWakeWord) {
@@ -1992,10 +2004,8 @@ function resetAfterVoiceMiss(title = "I did not catch that", message = "Say Hey 
   setState("idle", title, message)
   window.setTimeout(() => {
     commandInput.value = ""
-    setState("idle", "CEASER ready", "Say Hey CEASER when you need me.")
-    if (alwaysListenActive) startPassiveWakeLoop()
-    else window.ceaserDesktop?.hideOverlay?.()
-    window.ceaserDesktop?.hideOverlay?.()
+    if (assistantSessionActive) afterAssistantTurn()
+    else setState("idle", "CEASER ready", "Press the hotkey or type a command.")
   }, 1800)
 }
 
@@ -2066,9 +2076,8 @@ async function startPassiveWakeLoop() {
       if (loopGeneration !== voiceCommandGeneration) break
       if (!alwaysListenActive) break
       if ((response?.status === "wake_listening" || response?.recoverable) && !String(response?.transcript || "").trim()) {
-        console.log("[CEASER] Wake listener returned without speech; delaying degraded restart", response?.reason || response?.voice_control || "")
-        window.ceaserDesktop?.hideOverlay?.()
-        await new Promise((resolve) => window.setTimeout(resolve, 4000))
+        console.log("[CEASER] Wake listener returned without speech; keeping the command session active", response?.reason || response?.voice_control || "")
+        await new Promise((resolve) => window.setTimeout(resolve, 750))
         continue
       }
       await window.ceaserDesktop?.showOverlay?.()
@@ -2572,8 +2581,14 @@ document.getElementById("cancelAction").addEventListener("click", () => {
   setState("idle", "Cancelled", "No action was taken.")
 })
 
-document.getElementById("minimalButton")?.addEventListener("click", () => window.ceaserDesktop?.hideOverlay?.({ reason: "toolbar_minimize" }))
-document.getElementById("compactButton")?.addEventListener("click", () => window.ceaserDesktop?.hideOverlay?.({ reason: "toolbar_close" }))
+document.getElementById("minimalButton")?.addEventListener("click", () => {
+  markUserActivity("toolbar_minimize", { force: true })
+  setMode("compact")
+})
+document.getElementById("compactButton")?.addEventListener("click", () => {
+  clearInactivityTimer()
+  window.ceaserDesktop?.hideOverlay?.({ reason: "toolbar_close", force: true })
+})
 document.getElementById("expandButton")?.addEventListener("click", () => setMode("expanded"))
 document.querySelector(".minimal-shell")?.addEventListener("dblclick", () => setMode("compact"))
 document.querySelector(".compact-shell")?.addEventListener("dblclick", () => setMode("expanded"))
