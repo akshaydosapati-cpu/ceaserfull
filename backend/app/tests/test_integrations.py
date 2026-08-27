@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database.base import Base
 from app.core.database.session import get_db
+from app.core.config.settings import settings
 from app.core.security.dependencies import get_current_user
 from app.main import create_app
 from app.models.integration import Integration
@@ -78,7 +79,9 @@ def test_integration_provider_registry_and_dashboard_records() -> None:
     assert all(not item["connected"] for item in integrations)
 
 
-def test_connect_without_oauth_credentials_marks_provider_actionable() -> None:
+def test_connect_without_oauth_credentials_marks_provider_actionable(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "google_client_id", None)
+    monkeypatch.setattr(settings, "google_client_secret", None)
     response = client.post("/integrations/google-calendar/connect", json={})
     assert response.status_code == 200
     assert response.json()["provider"] == "google-calendar"

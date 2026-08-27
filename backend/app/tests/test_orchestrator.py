@@ -69,6 +69,34 @@ def current_user_dict() -> dict:
     return {"id": user.id, "email": user.email}
 
 
+def test_prepare_stream_fast_chat_skips_expensive_services(monkeypatch) -> None:
+    user = current_user_dict()
+    db = TestingSessionLocal()
+    orchestrator = CeaserOrchestrator(db)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("FastChat invoked an expensive service")
+
+    monkeypatch.setattr(orchestrator, "_knowledge_context", unexpected)
+    monkeypatch.setattr(orchestrator, "_maybe_research", unexpected)
+    monkeypatch.setattr(orchestrator.memory_retriever, "retrieve_relevant_memories", unexpected)
+    monkeypatch.setattr(orchestrator.workflow_orchestrator, "run", unexpected)
+
+    prepared = orchestrator.prepare_stream_request(
+        user_id=user["id"],
+        message="Explain recursion in simple terms.",
+        request_id="fast-chat-boundary",
+    )
+    db.close()
+
+    assert prepared["mode"] == "generate"
+    assert prepared["observability"]["request_mode"] == "DIRECT_CHAT"
+    assert prepared["observability"]["context_mode"] == "minimal"
+    assert prepared["observability"]["rag_used"] is False
+    assert prepared["observability"]["memory_used"] is False
+    assert prepared["observability"]["web_used"] is False
+
+
 def test_user_context_resolver_loads_enabled_agents() -> None:
     user = current_user_dict()
     db = TestingSessionLocal()
@@ -183,7 +211,7 @@ def test_orchestrator_extracts_named_research_query(monkeypatch) -> None:
     user = current_user_dict()
     captured_queries = []
 
-    def fake_research(self, query: str):
+    def fake_research(self, query: str, *, include_images: bool = False):
         captured_queries.append(query)
         from app.engines.research_engine.schemas import ResearchResult
 
