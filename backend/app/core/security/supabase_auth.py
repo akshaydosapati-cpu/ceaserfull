@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 from urllib.parse import urlencode
 
@@ -5,7 +6,28 @@ from app.core.config.settings import settings
 
 
 class SupabaseAuth:
-    _timeout = httpx.Timeout(8.0, connect=3.0, pool=3.0)
+    _timeout = httpx.Timeout(6.0, connect=3.0, pool=2.0)
+    _request_deadline_seconds = 7.0
+
+    def __init__(self) -> None:
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout,
+                trust_env=False,
+                limits=httpx.Limits(max_connections=40, max_keepalive_connections=20, keepalive_expiry=30.0),
+            )
+        return self._client
+
+    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        async with asyncio.timeout(self._request_deadline_seconds):
+            return await self._http_client().request(method, f"{self.supabase_url}{path}", **kwargs)
+
+    async def close(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
     @property
     def supabase_url(self) -> str | None:
         return settings.supabase_url
@@ -83,56 +105,44 @@ class SupabaseAuth:
     async def get_user(self, access_token: str) -> dict:
         if not self.configured:
             raise RuntimeError("Supabase Auth is not configured")
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.get(
-                f"{self.supabase_url}/auth/v1/user",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "apikey": self.anon_key or "",
-                },
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "GET",
+            "/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "apikey": self.anon_key or "",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def _post(self, path: str, payload: dict, access_token: str | None = None) -> dict:
         if not self.configured:
             raise RuntimeError("Supabase Auth is not configured")
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                f"{self.supabase_url}{path}",
-                json=payload,
-                headers=self._headers(access_token),
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request("POST", path, json=payload, headers=self._headers(access_token))
+        response.raise_for_status()
+        return response.json()
 
     async def _put(self, path: str, payload: dict, access_token: str | None = None) -> dict:
         if not self.configured:
             raise RuntimeError("Supabase Auth is not configured")
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.put(
-                f"{self.supabase_url}{path}",
-                json=payload,
-                headers=self._headers(access_token),
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request("PUT", path, json=payload, headers=self._headers(access_token))
+        response.raise_for_status()
+        return response.json()
 
     async def _get(self, path: str, access_token: str | None = None) -> dict:
         if not self.configured:
             raise RuntimeError("Supabase Auth is not configured")
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.get(f"{self.supabase_url}{path}", headers=self._headers(access_token))
-            response.raise_for_status()
-            return response.json()
+        response = await self._request("GET", path, headers=self._headers(access_token))
+        response.raise_for_status()
+        return response.json()
 
     async def _delete(self, path: str, access_token: str | None = None) -> dict:
         if not self.configured:
             raise RuntimeError("Supabase Auth is not configured")
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.delete(f"{self.supabase_url}{path}", headers=self._headers(access_token))
-            response.raise_for_status()
-            return response.json() if response.content else {"status": "ok"}
+        response = await self._request("DELETE", path, headers=self._headers(access_token))
+        response.raise_for_status()
+        return response.json() if response.content else {"status": "ok"}
 
     def _headers(self, access_token: str | None = None) -> dict[str, str]:
         headers = {"apikey": self.anon_key or ""}

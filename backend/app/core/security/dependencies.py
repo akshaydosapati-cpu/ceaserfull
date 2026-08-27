@@ -95,7 +95,7 @@ async def get_current_user(
         else:
             logger.info("ceaser_auth_stage stage=supabase_cache_hit")
             auth_trace.update(cache_hit=True, remote_ms=0.0)
-    except httpx.RequestError as exc:
+    except (httpx.RequestError, TimeoutError) as exc:
         logger.warning("ceaser_auth_stage stage=supabase_unavailable error=%s", exc.__class__.__name__)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication service temporarily unavailable") from exc
     except Exception as exc:  # noqa: BLE001

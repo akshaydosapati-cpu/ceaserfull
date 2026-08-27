@@ -81,18 +81,21 @@ export function WelcomeGate({ children }: { children: ReactNode }) {
       } catch (error) {
         if (mounted) setMessage(error instanceof Error ? cleanAuthMessage(error.message) : "Google sign-in could not continue.")
       }
-const token = getAccessToken()
-if (!token) {
-  if (mounted && !guestDemo) {
-    window.location.replace("/")
-    return
-  }
-  if (mounted) {
-    setAuthStatus("no_session")
-    setIsChecking(false)
-  }
-  return
-}
+      const token = getAccessToken()
+      if (!token) {
+        if (mounted && !guestDemo) {
+          setSession(null)
+          setOnboardingComplete(false)
+          setAuthStatus("unauthenticated")
+          setStep("auth")
+          setIsChecking(false)
+        }
+        if (mounted) {
+          if (guestDemo) setAuthStatus("no_session")
+          setIsChecking(false)
+        }
+        return
+      }
       setAuthStatus("verifying")
       recordStartupMetric("auth_verify_start")
       try {
@@ -144,17 +147,18 @@ if (!token) {
     }
   }, [guestDemo])
 
-useEffect(() => {
-  const onSessionExpired = () => {
-    clearConsoleSessionState()
-    setSession(null)
-    setOnboardingComplete(false)
-    setMessage("Your session expired. Please sign in again.")
-    window.location.replace("/")
-  }
-  window.addEventListener("ceaser:session-expired", onSessionExpired)
-  return () => window.removeEventListener("ceaser:session-expired", onSessionExpired)
-}, [])
+  useEffect(() => {
+    const onSessionExpired = () => {
+      clearConsoleSessionState()
+      setSession(null)
+      setOnboardingComplete(false)
+      setAuthStatus("unauthenticated")
+      setStep("auth")
+      setMessage("Your session expired. Please sign in again.")
+    }
+    window.addEventListener("ceaser:session-expired", onSessionExpired)
+    return () => window.removeEventListener("ceaser:session-expired", onSessionExpired)
+  }, [])
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.speechSynthesis) return

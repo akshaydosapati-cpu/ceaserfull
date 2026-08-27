@@ -39,6 +39,7 @@ from app.api.waitlist.routes import router as waitlist_router
 from app.api.workflows.routes import router as workflows_router
 from app.core.config.settings import settings
 from app.core.database.session import SessionLocal, begin_database_timing, database_timing, end_database_timing
+from app.core.security.supabase_auth import supabase_auth
 from app.intelligence.ai.errors import AIServiceUnavailableError
 from app.intelligence.ai.ai_provider_service import ai_provider_service
 from app.services.automations.automation_worker import automation_worker
@@ -78,6 +79,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await automation_worker.stop()
+        await supabase_auth.close()
         await ai_provider_service.llm.aclose()
 
 

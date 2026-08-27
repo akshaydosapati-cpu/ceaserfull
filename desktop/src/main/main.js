@@ -414,6 +414,10 @@ function parseDeepLinkPayload(rawUrl) {
 }
 
 let lastDesktopAuthCallback = null
+const DESKTOP_AUTH_EXCHANGE_TIMEOUT_MS = 45000
+const DESKTOP_SESSION_CHECK_TIMEOUT_MS = 20000
+const DESKTOP_DEVICE_REGISTER_TIMEOUT_MS = 30000
+const DESKTOP_BACKEND_WARM_TIMEOUT_MS = 20000
 
 function handleDeepLink(rawUrl) {
   const payload = parseDeepLinkPayload(rawUrl)
@@ -461,9 +465,9 @@ async function exchangeDesktopAuthCode(payload = {}) {
   pendingPkce = null
   const apiUrl = getEnv("CEASER_API_URL", "https://ceaser-backend-production-ur04.onrender.com").replace(/\/$/, "")
   const device = getDesktopDevice()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DESKTOP_AUTH_EXCHANGE_TIMEOUT_MS)
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 12000)
     const response = await fetch(`${apiUrl}/auth/desktop/exchange`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -475,7 +479,6 @@ async function exchangeDesktopAuthCode(payload = {}) {
       }),
       signal: controller.signal,
     })
-    clearTimeout(timer)
     startupLog(`desktop_auth_exchange_http_${response.status}`)
     if (!response.ok) return { ok: false, reason: `http_${response.status}` }
     const data = await response.json()
@@ -490,6 +493,8 @@ async function exchangeDesktopAuthCode(payload = {}) {
   } catch (error) {
     startupLog("desktop_auth_exchange_failed", error)
     return { ok: false, reason: error.name || "network" }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -520,14 +525,13 @@ async function validateDesktopSession() {
   if (!token && !refreshToken) return { linked: false, valid: false, reason: "missing" }
   if (authStatusCache.value && Date.now() < authStatusCache.expiresAt) return authStatusCache.value
   const apiUrl = getEnv("CEASER_API_URL", "https://ceaser-backend-production-ur04.onrender.com")
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DESKTOP_SESSION_CHECK_TIMEOUT_MS)
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 6000)
     const response = await fetch(`${apiUrl.replace(/\/$/, "")}/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
     })
-    clearTimeout(timer)
     if (response.ok) {
       const user = await response.json().catch(() => null)
       if (token !== getEnv("CEASER_ACCESS_TOKEN")) persistRuntimeAccess({ access_token: token, user })
@@ -554,6 +558,8 @@ async function validateDesktopSession() {
     const fallback = { linked: true, valid: null, reason: error.name || "network", linked_at: getEnv("CEASER_LINKED_AT", "") }
     authStatusCache = { value: fallback, expiresAt: Date.now() + 60 * 1000 }
     return fallback
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -583,7 +589,7 @@ async function registerDesktopDevice(apiUrl, accessToken, user = {}) {
   const device = getDesktopDevice()
   try {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 12000)
+    const timer = setTimeout(() => controller.abort(), DESKTOP_DEVICE_REGISTER_TIMEOUT_MS)
     let response
     try {
       response = await fetch(`${apiUrl.replace(/\/$/, "")}/desktop/devices`, {
@@ -804,7 +810,7 @@ async function refreshSecureSessionOnStartup() {
 function warmDesktopBackend() {
   const apiUrl = getEnv("CEASER_API_URL", "https://ceaser-backend-production-ur04.onrender.com").replace(/\/$/, "")
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 5000)
+  const timer = setTimeout(() => controller.abort(), DESKTOP_BACKEND_WARM_TIMEOUT_MS)
   void fetch(`${apiUrl}/health`, { signal: controller.signal })
     .then((response) => startupLog(`desktop_auth_backend_warm_http_${response.status}`))
     .catch((error) => startupLog("desktop_auth_backend_warm_deferred", error))
