@@ -9,6 +9,7 @@ import httpx
 
 from app.core.cache import ttl_cache
 from app.core.config import settings
+from app.engines.research_engine.http_client import research_http_client
 from app.services.news import NewsService
 
 
@@ -38,14 +39,14 @@ class SerperSearchProvider(SearchProvider):
         if cached is not None:
             return cached
         try:
-            with httpx.Client(timeout=10, follow_redirects=True, trust_env=False) as client:
-                response = client.post(
-                    self.base_url,
-                    headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                    json={"q": query, "num": result_limit, "autocorrect": False},
-                )
-                response.raise_for_status()
-                items = response.json().get("organic", [])
+            response = research_http_client().post(
+                self.base_url,
+                headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
+                json={"q": query, "num": result_limit, "autocorrect": False},
+                timeout=httpx.Timeout(6.0, connect=2.0),
+            )
+            response.raise_for_status()
+            items = response.json().get("organic", [])
         except Exception:  # noqa: BLE001
             return []
 
@@ -75,14 +76,14 @@ class SerperSearchProvider(SearchProvider):
             return cached
         image_url = f"{self.base_url.rsplit('/', 1)[0]}/images"
         try:
-            with httpx.Client(timeout=10, follow_redirects=True, trust_env=False) as client:
-                response = client.post(
-                    image_url,
-                    headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                    json={"q": query, "num": result_limit, "autocorrect": False},
-                )
-                response.raise_for_status()
-                items = response.json().get("images", [])
+            response = research_http_client().post(
+                image_url,
+                headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
+                json={"q": query, "num": result_limit, "autocorrect": False},
+                timeout=httpx.Timeout(6.0, connect=2.0),
+            )
+            response.raise_for_status()
+            items = response.json().get("images", [])
         except Exception:  # noqa: BLE001
             return []
 

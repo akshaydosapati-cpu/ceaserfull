@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from app.agents.v2.registry import AgentRegistry
-from app.intelligence.ai.model_router.models import ModelRequest, RoutingPolicy, Workload
+from app.intelligence.ai.model_router.models import ModelRequest, RoutingPolicy, Workload, ToolDefinition
 
 
 AGENT_MODEL_POLICY = {
@@ -14,6 +14,40 @@ AGENT_MODEL_POLICY = {
     "zeus": ({"reasoning"}, {"long_context"}, RoutingPolicy.QUALITY),
     "atlas": ({"general"}, {"long_context", "structured_output"}, RoutingPolicy.BALANCED),
 }
+
+
+def request_with_tools(
+    request: ModelRequest,
+    tools: list[ToolDefinition],
+) -> ModelRequest:
+    """Add tools to an existing ModelRequest and enable tool usage.
+
+    Args:
+        request: Existing model request
+        tools: List of tool definitions to add
+
+    Returns:
+        New ModelRequest with tools enabled
+    """
+    return ModelRequest(
+        request_id=request.request_id,
+        task_type=request.task_type,
+        workload=request.workload,
+        required_capabilities=request.required_capabilities,
+        preferred_capabilities=request.preferred_capabilities,
+        preferred_model_ids=request.preferred_model_ids,
+        context_size_estimate=request.context_size_estimate,
+        needs_tools=True,
+        tools=tools,
+        needs_vision=request.needs_vision,
+        needs_streaming=request.needs_streaming,
+        latency_preference=request.latency_preference,
+        quality_preference=request.quality_preference,
+        cost_preference=request.cost_preference,
+        policy=request.policy,
+        agent_id=request.agent_id,
+        metadata=request.metadata,
+    )
 
 
 def request_for_agent(
@@ -62,3 +96,39 @@ def request_for_chat(*, streaming: bool = False, context_size_estimate: int = 0,
         required_capabilities=required,
         preferred_capabilities=preferred, preferred_model_ids=frozenset(preferred_model_ids or []), needs_streaming=streaming, context_size_estimate=context_size_estimate, policy=policy,
     )
+
+
+def request_with_integration_tools(
+    db: Any,
+    user_id: str,
+    request: ModelRequest,
+) -> ModelRequest:
+    """Add integration tools to a ModelRequest.
+
+    Args:
+        db: Database session
+        user_id: User ID
+        request: Existing model request
+
+    Returns:
+        ModelRequest with tools if integrations are connected
+    """
+    from app.services.integrations.integration_tool_service import IntegrationToolService
+
+    tool_service = IntegrationToolService(db)
+    tools = tool_service.get_available_tools(user_id)
+
+    if not tools:
+        return request
+
+    # Convert ToolDefinition to dict format for OpenAI-compatible tools
+    tool_defs = [
+        ToolDefinition(
+            name=t.name,
+            description=t.description,
+            parameters=t.parameters,
+        )
+        for t in tools
+    ]
+
+    return request_with_tools(request, tool_defs)

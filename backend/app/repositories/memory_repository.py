@@ -9,11 +9,14 @@ class MemoryRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def list(self, user_id: str | None = None) -> list[Memory]:
+    def list(self, user_id: str | None = None, limit: int | None = None) -> list[Memory]:
         query = self.db.query(Memory)
         if user_id:
             query = query.filter(Memory.user_id == user_id)
-        return query.order_by(Memory.created_at.desc()).all()
+        query = query.order_by(Memory.created_at.desc())
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
 
     def get(self, memory_id: str) -> Memory | None:
         return self.db.get(Memory, memory_id)
@@ -35,11 +38,9 @@ class MemoryRepository:
         return None
 
     def search(self, query: str, user_id: str | None = None) -> list[Memory]:
-        db_query = self.db.query(Memory)
+        query_expr = self.db.query(Memory)
         if user_id:
-            db_query = db_query.filter(Memory.user_id == user_id)
-        memories = db_query.order_by(Memory.created_at.desc()).all()
-        if not query:
-            return memories
-        normalized_query = query.lower()
-        return [memory for memory in memories if normalized_query in memory.content.lower()]
+            query_expr = query_expr.filter(Memory.user_id == user_id)
+        if query:
+            query_expr = query_expr.filter(Memory.content.ilike(f"%{query}%"))
+        return query_expr.order_by(Memory.created_at.desc()).all()

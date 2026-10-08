@@ -154,16 +154,23 @@ async function request<T>(path: string, options: RequestOptions, accessToken: st
     recordStartupMetric("first_api_start", { path })
   }
   try {
+    const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData
+    const requestBody: BodyInit | undefined = options.body === undefined ? undefined : isFormData ? options.body as FormData : JSON.stringify(options.body)
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
       signal: options.signal ?? AbortSignal.timeout(timeoutFor(path)),
       headers: {
-        "Content-Type": "application/json",
+        ...(!isFormData ? { "Content-Type": "application/json" } : {}),
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         ...options.headers,
       },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: requestBody,
     })
+    if (typeof window !== "undefined" && (path === "/admin/me" || path === "/auth/me")) {
+      console.info("[CEASER AUTH TIMING]", JSON.stringify({ path, request_id: response.headers.get("x-request-id"),
+        browser_headers_ms: Math.round(performance.now() - startedAt), status: response.status,
+        server_timing: response.headers.get("server-timing") }))
+    }
     if (typeof window !== "undefined" && !performance.getEntriesByName("ceaser:first_api_response").length) {
       const totalMs = Math.round(performance.now() - startedAt)
       const serverMs = Number(response.headers.get("x-process-time-ms") || 0)
@@ -270,6 +277,16 @@ export function apiRequest<T>(path: string, options: RequestOptions = {}): Promi
   return pending
 }
 
+export async function apiBlobRequest(path: string): Promise<Blob> {
+  let response = await request(path, { method: "GET" }, getAccessToken())
+  if (response.status === 401 && shouldRefresh(path)) {
+    const refreshedToken = await refreshAccessToken()
+    if (refreshedToken) response = await request(path, { method: "GET" }, refreshedToken)
+  }
+  if (!response.ok) throw new ApiError("Document could not be loaded.", response.status)
+  return response.blob()
+}
+
 export async function apiStreamRequest(
   path: string,
   options: RequestOptions = {},
@@ -285,6 +302,13 @@ export async function apiStreamRequest(
   } = {},
 ) {
   const accessToken = getAccessToken()
+  const streamStartedAt = performance.now()
+  const latency: Record<string, unknown> = { path, request_id: new Headers(options.headers).get("x-request-id") }
+  const markStream = (stage: string) => {
+    latency[stage] = Math.round(performance.now() - streamStartedAt)
+    console.info("[CEASER STREAM]", JSON.stringify({ ...latency, stage }))
+  }
+  markStream("request_created")
   const streamOptions: RequestOptions = {
     ...options,
     headers: {
@@ -293,7 +317,11 @@ export async function apiStreamRequest(
       ...options.headers,
     },
   }
+  markStream("request_dispatched")
   let response = await request(path, streamOptions, accessToken)
+  latency.request_id = response.headers.get("x-request-id")
+  latency.server_timing = response.headers.get("server-timing")
+  markStream("request_headers_received")
 
   if (response.status === 401 && shouldRefresh(path)) {
     const refreshedToken = await refreshAccessToken()
@@ -319,9 +347,9 @@ export async function apiStreamRequest(
   let buffer = ""
 
   const dispatchEvent = (raw: string) => {
-    const lines = raw.split("\n")
+    const lines = raw.split(/\r?\n/)
     const eventName = lines.find((line) => line.startsWith("event:"))?.replace("event:", "").trim()
-    const dataLine = lines.find((line) => line.startsWith("data:"))?.replace(/^data:\s?/, "")
+    const dataLine = lines.filter((line) => line.startsWith("data:")).map((line) => line.replace(/^data:\s?/, "")).join("\n")
     if (!eventName || !dataLine) return
     let payload: Record<string, unknown> | string = dataLine
     try {
@@ -329,8 +357,15 @@ export async function apiStreamRequest(
     } catch {
       // Some stream events send raw text chunks.
     }
+    if (eventName === "response.started" && typeof payload !== "string") latency.request_id = payload.id
+    if (eventName === "diagnostics" && typeof payload !== "string") {
+      console.info("[CEASER BACKEND TIMING]", JSON.stringify({ ...payload, browser_received_ms: Math.round(performance.now() - streamStartedAt) }))
+    }
     if (eventName === "status" && typeof payload !== "string") handlers.onStatus?.(payload)
-    if (eventName === "token") handlers.onToken?.(typeof payload === "string" ? payload : String(payload.text ?? ""))
+    if (eventName === "token") {
+      if ((typeof payload === "string" ? payload : String(payload.text ?? "")).length && latency.first_content_token_received === undefined) markStream("first_content_token_received")
+      handlers.onToken?.(typeof payload === "string" ? payload : String(payload.text ?? ""))
+    }
     if (eventName === "complete" && typeof payload !== "string") handlers.onComplete?.(payload)
     if (eventName === "activity" && typeof payload !== "string") handlers.onActivity?.(payload)
     if ((eventName === "block.created" || eventName === "block.updated") && typeof payload !== "string") handlers.onBlock?.(payload)
@@ -342,15 +377,24 @@ export async function apiStreamRequest(
     }
   }
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const events = buffer.split("\n\n")
-    buffer = events.pop() ?? ""
-    for (const raw of events) dispatchEvent(raw)
+  try {
+    while (true) {
+      options.signal?.throwIfAborted()
+      const { done, value } = await reader.read()
+      if (done) break
+      if (latency.first_stream_chunk_received === undefined) markStream("first_stream_chunk_received")
+      buffer += decoder.decode(value, { stream: true })
+      const events = buffer.split(/\r?\n\r?\n/)
+      buffer = events.pop() ?? ""
+      for (const raw of events) dispatchEvent(raw)
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) dispatchEvent(buffer)
+    markStream("stream_complete")
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
   }
-  if (buffer.trim()) dispatchEvent(buffer)
 }
 
 function canCache(path: string) {

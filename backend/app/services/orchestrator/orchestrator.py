@@ -12,8 +12,10 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.core.config.settings import settings
-from app.agents.registry import AgentRegistry
-from app.agents.v2 import AgentOrchestrator as SpecialistAgentOrchestrator
+from app.schemas.task_state import TaskStateSchema
+from app.services.state.state_merger import merge_state
+from app.services.state.user_state_extractor import extract_user_state
+from app.agents.v2 import AgentOrchestrator as SpecialistAgentOrchestrator, AgentRegistry
 from app.engines.research_engine import ResearchEngine
 from app.models.conversation import Conversation, Message
 from app.models.project import Project, ProjectMember
@@ -25,6 +27,7 @@ from app.services.orchestrator.memory_capture import MemoryCapture
 from app.services.orchestrator.memory_retriever import MemoryRetriever
 from app.services.orchestrator.knowledge_router import KnowledgeRoute, KnowledgeRouter
 from app.services.orchestrator.response_pipeline import ResponsePipeline
+from app.services.orchestrator.response_planner import OperationType, response_planner
 from app.services.orchestrator.suggestion_engine import SuggestionEngine
 from app.services.project_service import ProjectService
 from app.services.orchestrator.user_context_resolver import UserContextResolver
@@ -48,6 +51,7 @@ from app.intelligence.orchestrator.intent_engine import intent_engine
 from app.intelligence.orchestrator.models import IntentType
 from app.intelligence.orchestrator.models import RequestContext
 from app.intelligence.orchestrator.retrieval_planner import retrieval_planner
+from app.core.database.session import database_timing
 
 
 logger = logging.getLogger(__name__)
@@ -103,14 +107,24 @@ class CeaserOrchestrator:
             names = ", ".join(document["name"] for document in attached_documents)
             effective_message = f"{message}\n\nAttached document(s): {names}"
 
-        conversation = self._get_conversation(conversation_id)
+        conversation = self._get_conversation(conversation_id, user_id=user_id)
         conversation_context = self._conversation_context(conversation)
         follow_up_trace = self._follow_up_trace(
             message=message,
             conversation_context=conversation_context,
             parent_message_id=parent_message_id,
         )
-        effective_message = self._contextualize_follow_up(effective_message, follow_up_trace)
+        previous_artifacts = self._previous_artifacts(conversation_context)
+        response_plan = response_planner.plan(
+            message,
+            conversation_context=conversation_context,
+            previous_artifacts=previous_artifacts,
+            follow_up_trace=follow_up_trace,
+        )
+        response_plan_payload = self._response_plan_payload(response_plan)
+        effective_message = self._contextualize_follow_up(
+            effective_message, follow_up_trace, response_plan=response_plan_payload
+        )
         route_decision = self.knowledge_router.classify(
             message=message,
             has_attached_files=bool(attached_documents),
@@ -251,9 +265,9 @@ class CeaserOrchestrator:
             )
 
         workflow = None
-        if self._is_explicit_workflow_creation_request(message):
-            workflow = self.workflow_orchestrator.run(user_id=user_id, message=message, conversation_id=conversation_id, file_ids=file_ids or [])
-        selected_agent_names = workflow.selected_agents if workflow else self._default_stream_agents(message)
+        selected_agent_names = self._default_stream_agents(message)
+        if self._non_generative_operation(response_plan_payload):
+            selected_agent_names = [name for name in selected_agent_names if str(name).lower() != "bolt"]
         report_request = self._is_report_request(message)
         memory_first_context: dict[str, Any] | None = None
         memory_first_results: list[dict] = []
@@ -270,10 +284,15 @@ class CeaserOrchestrator:
             knowledge_context=memory_first_context,
             memories=memory_first_results,
         )
-        research_result = self._maybe_research(
+        research_result = self._execute_research(
+            user_id=user_id,
+            message=message,
+            conversation_id=conversation.id if conversation else conversation_id,
+            conversation_context=conversation_context,
             query=self._research_query(message, conversation_context),
             selected_agent_names=selected_agent_names,
-        ) if self._should_run_live_research(route=route_decision.route, has_internal_context=has_internal_context) else None
+            should_run_research=self._should_run_live_research(route=route_decision.route, has_internal_context=has_internal_context),
+        )
         lightweight_follow_up = route_decision.route is KnowledgeRoute.FOLLOW_UP
         lightweight_normal = route_decision.route in {KnowledgeRoute.GENERAL, KnowledgeRoute.DESKTOP} and not self._requires_rich_context(message) and memory_first_context is None
         knowledge_context = memory_first_context or (self._lightweight_follow_up_context(follow_up_trace) if lightweight_follow_up else self._minimal_chat_context() if lightweight_normal else self._knowledge_context(
@@ -299,8 +318,11 @@ class CeaserOrchestrator:
                 "cloud_resources": knowledge_context.get("resources", []) if isinstance(knowledge_context, dict) else [],
                 "available_capabilities": [item for definition in self.specialist_agents.registry.enabled() for item in definition.allowed_capability_categories],
             },
-        )
+        ) if settings.agents_enabled else None
         captured_memories = self.memory_capture.capture(user_id=user_id, message=message)
+        # Build integration tools context for LLM tool calling
+        integration_tools_context = self._build_integration_tools_context(user_id)
+
         final_response = self.response_pipeline.generate(
             message=message,
             context={
@@ -327,6 +349,7 @@ class CeaserOrchestrator:
                 "research_result": research_result.model_dump() if research_result else None,
                 "model_preference": model_preference,
                 "force_live_web_search": force_live_web_search,
+                **integration_tools_context,
             },
         )
         captured_response_memories = self.memory_capture.capture_interaction(
@@ -416,7 +439,7 @@ class CeaserOrchestrator:
             )
         return response_payload
 
-    def prepare_stream_request(
+    async def prepare_stream_request(
         self,
         user_id: str,
         message: str,
@@ -427,17 +450,33 @@ class CeaserOrchestrator:
         parent_message_id: str | None = None,
         model_preference: str | None = None,
         force_live_web_search: bool = False,
+        conversation: Conversation | None = None,
     ) -> dict[str, Any]:
         started = perf_counter()
         request_trace: dict[str, Any] = {}
         stage_started = perf_counter()
+        stage_db_count, stage_db_ms = database_timing()
 
         def mark_stage(stage: str) -> None:
-            nonlocal stage_started
+            nonlocal stage_started, stage_db_count, stage_db_ms
             duration_ms = round((perf_counter() - stage_started) * 1000, 2)
-            request_trace.setdefault("stage_timings", []).append({"stage": stage, "duration_ms": duration_ms})
-            logger.info("ceaser_prepare_stage request_id=%s stage=%s duration_ms=%s", request_id, stage, duration_ms)
+            db_count, db_ms = database_timing()
+            query_count = max(0, db_count - stage_db_count)
+            query_ms = round(max(0.0, db_ms - stage_db_ms), 2)
+            request_trace.setdefault("stage_timings", []).append({
+                "stage": stage,
+                "duration_ms": duration_ms,
+                "db_queries": query_count,
+                "db_ms": query_ms,
+            })
+            log_started = perf_counter()
+            logger.info(
+                "ceaser_prepare_stage request_id=%s stage=%s duration_ms=%s db_queries=%s db_ms=%s",
+                request_id, stage, duration_ms, query_count, query_ms,
+            )
+            request_trace["logging_ms"] = request_trace.get("logging_ms", 0.0) + (perf_counter() - log_started) * 1000
             stage_started = perf_counter()
+            stage_db_count, stage_db_ms = db_count, db_ms
 
         logger.info("ceaser_prepare_stage request_id=%s stage=preparation_started duration_ms=0", request_id)
         attached_documents = self._attached_documents(user_id=user_id, file_ids=file_ids or [], trace=request_trace)
@@ -455,7 +494,9 @@ class CeaserOrchestrator:
                 trace=request_trace,
             )
 
-        conversation = self._get_conversation(conversation_id)
+        conversation = conversation or self._get_conversation(conversation_id, user_id=user_id)
+        if conversation is not None and conversation.user_id != user_id:
+            raise ValueError("Conversation not found.")
         mark_stage("conversation_lookup")
         conversation_context = self._conversation_context(conversation)
         mark_stage("history_load")
@@ -464,7 +505,17 @@ class CeaserOrchestrator:
             conversation_context=conversation_context,
             parent_message_id=parent_message_id,
         )
-        effective_message = self._contextualize_follow_up(effective_message, follow_up_trace)
+        previous_artifacts = self._previous_artifacts(conversation_context)
+        response_plan = response_planner.plan(
+            message,
+            conversation_context=conversation_context,
+            previous_artifacts=previous_artifacts,
+            follow_up_trace=follow_up_trace,
+        )
+        response_plan_payload = self._response_plan_payload(response_plan)
+        effective_message = self._contextualize_follow_up(
+            effective_message, follow_up_trace, response_plan=response_plan_payload
+        )
         route_decision = self.knowledge_router.classify(
             message=message,
             has_attached_files=bool(attached_documents),
@@ -472,22 +523,31 @@ class CeaserOrchestrator:
         )
         mark_stage("knowledge_classification")
 
-        if conversation:
+        user_message_metadata = {
+            "request_id": request_id,
+            "parent_message_id": parent_message_id,
+            "attached_files": [{"id": item["id"], "name": item["name"], "file_type": item["file_type"]} for item in attached_documents],
+            "follow_up_detected": follow_up_trace["follow_up_detected"],
+            "active_topic": follow_up_trace["active_topic"],
+            "active_subtopic": follow_up_trace.get("active_subtopic"),
+            "last_user_intent": follow_up_trace.get("follow_up_intent"),
+            "resolved_entities": follow_up_trace["resolved_entities"],
+            "context_source": follow_up_trace["context_source"],
+        }
+
+        # Direct provider responses persist the turn after the first token is
+        # forwarded. Direct local/integration results still persist here.
+        defer_user_turn = route_decision.route not in {
+            KnowledgeRoute.CALENDAR,
+            KnowledgeRoute.INTEGRATION,
+            KnowledgeRoute.MEMORY,
+        }
+        if conversation and not defer_user_turn:
             self.conversations.create_message(
                 conversation_id=conversation.id,
                 role="user",
                 content=message,
-                metadata={
-                    "request_id": request_id,
-                    "parent_message_id": parent_message_id,
-                    "attached_files": [{"id": item["id"], "name": item["name"], "file_type": item["file_type"]} for item in attached_documents],
-                    "follow_up_detected": follow_up_trace["follow_up_detected"],
-                    "active_topic": follow_up_trace["active_topic"],
-                    "active_subtopic": follow_up_trace.get("active_subtopic"),
-                    "last_user_intent": follow_up_trace.get("follow_up_intent"),
-                    "resolved_entities": follow_up_trace["resolved_entities"],
-                    "context_source": follow_up_trace["context_source"],
-                },
+                metadata=user_message_metadata,
                 ingest_knowledge=False,
             )
             if conversation.title == "New Chat":
@@ -580,12 +640,20 @@ class CeaserOrchestrator:
         else:
             request_mode = "DIRECT_CHAT"
 
+        # _requires_rich_context fires on topic keywords (business, startup,
+        # strategy). Without attached files there is nothing to retrieve from the
+        # knowledge base, so forcing the full RAG pipeline is wasted work.
+        # Only allow rich-context retrieval when the user actually attached files.
+        rich_context_required = bool(
+            (attached_documents or file_ids)
+            and self._requires_rich_context(message)
+        )
         simple_chat_request = self.fast_chat.accepts(FastChatRequest(
             route=route_decision,
             has_attachments=bool(attached_documents),
             has_file_ids=bool(file_ids),
             report_requested=report_request,
-            rich_context_required=self._requires_rich_context(message),
+            rich_context_required=rich_context_required,
             live_web_requested=force_live_web_search,
         ))
 
@@ -593,7 +661,7 @@ class CeaserOrchestrator:
         # branch before agent selection so registry/workflow work cannot delay
         # the provider hot path.
         if explicit_workflow:
-            workflow = self.workflow_orchestrator.run(
+            workflow = await self.workflow_orchestrator.run(
                 user_id=user_id,
                 message=message,
                 conversation_id=conversation_id,
@@ -605,6 +673,9 @@ class CeaserOrchestrator:
         elif request_mode != "DIRECT_CHAT":
             selected_agent_names = self._default_stream_agents(message)
         mark_stage("agent_or_workflow_selection")
+
+        # Store workflow result in prepared so finalize_stream_response can access it
+        workflow_result = workflow if explicit_workflow else None
 
         routing_finished = perf_counter()
         retrieval_started = perf_counter()
@@ -633,8 +704,18 @@ class CeaserOrchestrator:
             memories=memory_first_results,
         )
         tool_calls_started = perf_counter()
-        is_coding_request = "Bolt" in selected_agent_names or bool(
-            re.search(r"\b(?:code|coding|program|script|function|component|html|css|javascript|typescript|python|java|sql|debug)\b", message, re.I)
+        is_coding_request = (
+            not self._non_generative_operation(response_plan_payload)
+            and (
+                "Bolt" in selected_agent_names
+                or bool(
+                    re.search(
+                        r"\b(?:code|coding|program|script|function|component|html|css|javascript|typescript|python|java|sql|debug)\b",
+                        message,
+                        re.I,
+                    )
+                )
+            )
         )
         explicit_research_request = bool(re.search(r"\b(?:search|research|latest|current|documentation|docs|sources)\b", message, re.I))
         web_search_requested = (not is_coding_request or explicit_research_request) and (
@@ -687,6 +768,7 @@ class CeaserOrchestrator:
         # Memory capture is post-response work. It must never delay provider
         # invocation or the first visible token.
         captured_memories: list[dict] = []
+        research_timings = research_result.timings if research_result else {}
         observability = {
             "prepare_ms": round((perf_counter() - started) * 1000, 2),
             "stage_timings": list(request_trace.get("stage_timings", [])),
@@ -709,6 +791,10 @@ class CeaserOrchestrator:
             "memory_used": bool(memories),
             "rag_used": bool(memory_first_context),
             "web_used": bool(research_result),
+            "search_ms": research_timings.get("search_ms", 0.0),
+            "extraction_ms": research_timings.get("extraction_ms", 0.0),
+            "research_assembly_ms": research_timings.get("research_assembly_ms", 0.0),
+            "research_total_ms": research_timings.get("research_total_ms", 0.0),
             "dataset_used": bool(dataset_result and dataset_result.get("rows")),
             "file_lookup_ms": request_trace.get("file_lookup_ms") or knowledge_context.get("file_lookup_ms"),
             "permission_check_ms": request_trace.get("permission_check_ms"),
@@ -729,7 +815,7 @@ class CeaserOrchestrator:
             "global_memory_used": bool(memories),
             "stage_timings": request_trace.get("stage_timings", []),
         }
-        return {
+        prepared = {
             "mode": "generate",
             "user_id": user_id,
             "message": message,
@@ -748,6 +834,9 @@ class CeaserOrchestrator:
             "request_id": request_id,
             "parent_message_id": parent_message_id,
             "follow_up_trace": follow_up_trace,
+            "defer_user_turn": defer_user_turn,
+            "original_message": message,
+            "user_message_metadata": user_message_metadata,
             "context": {
                 "scope": {"name": "CEASER", "type": "personal_ai_os"},
                 "current_message": message,
@@ -761,6 +850,7 @@ class CeaserOrchestrator:
                 "documents": attached_documents,
                 "knowledge_context": knowledge_context,
                 "follow_up_trace": follow_up_trace,
+                "response_plan": response_plan_payload,
                 "merged_contributions": {
                     "selected_agents": selected_agent_names,
                     "contributions": workflow.contributions if workflow else [],
@@ -773,23 +863,42 @@ class CeaserOrchestrator:
                 "research_result": research_result.model_dump() if research_result else None,
             },
         }
+        observability["prepare_ms"] = round((perf_counter() - started) * 1000, 2)
+        observability["prepare_logging_ms"] = round(request_trace.get("logging_ms", 0.0), 2)
+        observability["prepare_unattributed_ms"] = round(max(0.0, observability["prepare_ms"] - sum(
+            stage["duration_ms"] for stage in request_trace.get("stage_timings", [])
+        ) - observability["prepare_logging_ms"]), 2)
+        prepared["workflow"] = workflow_result
+        return prepared
 
     def begin_stream_response(self, prepared: dict[str, Any]) -> Message | None:
         """Create a durable assistant message before a long stream finishes."""
         conversation = prepared.get("conversation")
         if not conversation:
             return None
-        return self.conversations.create_message(
-            conversation_id=conversation.id,
-            role="assistant",
-            content="",
-            metadata={
+        assistant_metadata = {
                 "streaming": True,
                 "request_id": prepared.get("request_id"),
                 "parent_message_id": prepared.get("parent_message_id"),
-            },
-            ingest_knowledge=False,
-        )
+            }
+        if prepared.get("defer_user_turn"):
+            title = self.conversations.generate_title(prepared["original_message"]) if conversation.title == "New Chat" else None
+            assistant = self.conversations.begin_stream_turn(
+                conversation,
+                user_content=prepared["original_message"],
+                user_metadata=prepared.get("user_message_metadata"),
+                assistant_metadata=assistant_metadata,
+                title=title,
+            )
+        else:
+            assistant = self.conversations.create_message(
+                conversation_id=conversation.id, role="assistant", content="",
+                metadata=assistant_metadata, ingest_knowledge=False,
+            )
+        # Retain the ID inside the worker before cancellation can discard its
+        # return value. Message metadata is encrypted and cannot be SQL-filtered.
+        prepared["assistant_message_id"] = assistant.id
+        return assistant
 
     def persist_stream_response(self, assistant_message: Message | None, content: str) -> None:
         """Checkpoint partial text so a browser refresh never loses a stream."""
@@ -829,19 +938,24 @@ class CeaserOrchestrator:
             user_message=prepared["message"],
             assistant_response=final_response,
         )
-        suggestions = self._generate_suggestions(
+        # Generate deterministic fallback suggestions inside DB worker to avoid
+        # blocking network LLM call. The async layer will generate AI suggestions
+        # after DB settlement completes.
+        category = self.suggestion_engine._detect_category(
             user_query=prepared["message"],
             response_text=final_response,
-            conversation=prepared.get("conversation"),
-            conversation_context=prepared.get("conversation_context"),
             intent=prepared.get("knowledge_context", {}).get("intent"),
             retrieval_scope=prepared.get("observability", {}).get("retrieval_scope"),
             output_format=prepared.get("knowledge_context", {}).get("output_format"),
             intent_domain=prepared.get("knowledge_context", {}).get("intent_domain"),
             intent_subdomain=prepared.get("knowledge_context", {}).get("intent_subdomain"),
-            request_id=prepared.get("request_id"),
-            parent_message_id=prepared.get("parent_message_id"),
-            active_topic=follow_up_trace.get("active_topic"),
+        )
+        suggestions = self.suggestion_engine._intent_fallback(
+            category=category,
+            user_query=prepared["message"],
+            response_text=final_response,
+            recent_suggestions=self._recent_suggestions(prepared.get("conversation")),
+            max_items=5,
         )
         response_payload = {
             "scope": "personal_ai_os",
@@ -1204,6 +1318,7 @@ class CeaserOrchestrator:
         if not self._is_explicit_google_calendar_request(normalized):
             return None
 
+        date_specific = self._is_date_specific_calendar_request(normalized)
         target_date = self._calendar_target_date(message)
         try:
             integration_manager = IntegrationManager(self.db)
@@ -1219,19 +1334,48 @@ class CeaserOrchestrator:
             return "Google Calendar is not connected yet. Connect it from Integrations, then I can read your events."
 
         events = metadata.get("items") or []
-        matched_events = self._filter_calendar_events(events, target_date)
+        matched_events = self._filter_calendar_events(events, target_date) if date_specific else events
         date_label = f"{target_date.strftime('%B')} {target_date.day}, {target_date.year}"
         if not matched_events:
-            return f"I checked your Google Calendar. You have no events on {date_label}."
+            return (
+                f"I checked your Google Calendar. You have no events on {date_label}."
+                if date_specific
+                else "I checked your Google Calendar. You have no upcoming events."
+            )
 
-        lines = [f"Here is what I found on your Google Calendar for {date_label}:"]
-        for index, event in enumerate(matched_events, start=1):
-            start = self._format_calendar_time(event.get("start"))
-            end = self._format_calendar_time(event.get("end"))
+        lines = [
+            f"Here is what I found on your Google Calendar for {date_label}:"
+            if date_specific
+            else "Here are your upcoming Google Calendar events, grouped by date:"
+        ]
+        seen: set[tuple[str, str, str, str]] = set()
+        current_date: date | None = None
+        for event in matched_events:
+            event_date = self._calendar_event_date(event.get("start"))
+            identity = (
+                str(event_date or ""),
+                str(event.get("start") or ""),
+                str(event.get("title") or ""),
+                str(event.get("location") or ""),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+
+            if not date_specific and event_date != current_date:
+                current_date = event_date
+                lines.extend(["", f"**{self._format_calendar_date(event_date)}**"])
+
+            all_day = bool(event.get("all_day")) or self._is_date_only_calendar_value(event.get("start"))
+            start = "All day" if all_day else self._format_calendar_time(event.get("start"))
+            end = "" if all_day else self._format_calendar_time(event.get("end"))
             title = event.get("title") or "Untitled event"
             location = f" - {event.get('location')}" if event.get("location") else ""
+            calendar_source = ""
+            if event.get("calendar_name") and not event.get("calendar_primary"):
+                calendar_source = f" ({event.get('calendar_name')})"
             time_range = f"{start} - {end}" if end and end != start else start
-            lines.append(f"{index}. {time_range}: {title}{location}")
+            lines.append(f"- **{time_range}** - {title}{calendar_source}{location}")
         return "\n".join(lines)
 
     def _maybe_integration_response(self, user_id: str, message: str) -> str | None:
@@ -1256,9 +1400,9 @@ class CeaserOrchestrator:
             provider_id, label = "google-drive", "Google Drive"
         elif self._is_explicit_gmail_request(normalized):
             provider_id, label = "gmail", "Gmail"
-        elif re.search(r"\b(?:show|list|read|find|check|sync)\b.{0,40}\b(?:google tasks|my tasks|my todo|my to-do)\b", normalized):
+        elif self._is_explicit_google_tasks_request(normalized):
             provider_id, label = "google-tasks", "Google Tasks"
-        elif re.search(r"\b(?:show|list|read|find|check|sync)\b.{0,40}\b(?:google classroom|my assignments|my coursework)\b", normalized):
+        elif self._is_explicit_google_classroom_request(normalized):
             provider_id, label = "google-classroom", "Google Classroom"
         elif re.search(r"\b(?:show|list|read|find|search|check|sync|use|summarize|summary|explain|what|who)\b.{0,90}\b(?:notion|my notion|notion page|notion pages|notion database|notion databases|notion docs|notion workspace|notion members|notion users|workspace members|workspace users|workspace context|knowledge sources)\b", normalized):
             provider_id, label = "notion", "Notion"
@@ -1299,7 +1443,7 @@ class CeaserOrchestrator:
                 or item.get("course_title")
                 or "Untitled"
             )
-            detail = item.get("from") or item.get("modified_time") or item.get("due") or item.get("status") or ""
+            detail = item.get("from") or item.get("modified_time") or item.get("due") or item.get("due_date") or item.get("course") or item.get("status") or ""
             lines.append(f"{index}. {title}{f' - {detail}' if detail else ''}")
         return "\n".join(lines)
 
@@ -1390,6 +1534,19 @@ class CeaserOrchestrator:
 
         if result.capability == "notion.list_tasks":
             return self._format_notion_task_tool_result(data)
+
+        if result.capability == "notion.list_members":
+            members = data.get("members") or []
+            if not members:
+                return "I checked Notion, but no workspace members are visible to the CEASER integration."
+            lines = ["Notion workspace members visible to CEASER:"]
+            for index, member in enumerate(members[:25], start=1):
+                name = member.get("name") or "Unnamed user"
+                email = member.get("email")
+                member_type = member.get("type")
+                details = [value for value in (email, member_type) if value]
+                lines.append(f"{index}. {name}" + (f" - {' - '.join(details)}" if details else ""))
+            return "\n".join(lines)
 
         if result.capability == "notion.create_task":
             task = data.get("task") or {}
@@ -1870,12 +2027,19 @@ class CeaserOrchestrator:
 
     def _is_explicit_google_calendar_request(self, message: str) -> bool:
         calendar_reference = bool(re.search(r"\b(?:google calendar|my calendar|calendar|calender)\b", message))
-        calendar_action = bool(re.search(r"\b(?:check|show|list|read|find|add|create|schedule|sync|fit)\b", message))
+        calendar_action = bool(re.search(r"\b(?:check|show|list|read|find|add|create|schedule|sync|fit|upcoming|next)\b", message))
         personal_event_request = bool(re.search(
-            r"\b(?:what|which|show|list|check)\b.{0,40}\b(?:my events|my meetings|my availability|my free time)\b|\b(?:am i|are we)\s+(?:free|available)\b|\bmy availability\b",
+            r"\b(?:what|which|show|list|check)\b.{0,40}\b(?:my events|my meetings|my availability|my free time)\b|\b(?:am i|are we)\s+(?:free|available)\b|\bmy availability\b|\b(?:my\s+)?upcoming\s+(?:events|meetings)\b|\b(?:events|meetings)\s+do\s+i\s+have\b|\bnext\s+meeting\b",
             message,
         ))
         return (calendar_reference and calendar_action) or personal_event_request
+
+    def _is_date_specific_calendar_request(self, message: str) -> bool:
+        if re.search(r"\b(?:today|tomorrow)\b", message):
+            return True
+        if re.search(r"\b(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\s+\d{1,2}", message):
+            return True
+        return bool(re.search(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", message))
 
     def _is_explicit_google_drive_request(self, message: str) -> bool:
         drive_reference = bool(re.search(r"\b(?:google drive|my drive|drive (?:file|files|document|documents|folder|folders)|my files)\b", message))
@@ -1883,9 +2047,19 @@ class CeaserOrchestrator:
         return drive_reference and data_action
 
     def _is_explicit_gmail_request(self, message: str) -> bool:
-        gmail_reference = bool(re.search(r"\b(?:gmail|my inbox|my emails?|my mail)\b", message))
+        gmail_reference = bool(re.search(r"\b(?:gmail|my inbox|my emails?|my mail|my unread emails?|unread emails?)\b", message))
         data_action = bool(re.search(r"\b(?:read|find|search|show|list|check|sync)\b", message))
         return gmail_reference and data_action
+
+    def _is_explicit_google_tasks_request(self, message: str) -> bool:
+        task_reference = bool(re.search(r"\b(?:google tasks|my tasks|my todo|my to-do|pending tasks)\b", message))
+        data_action = bool(re.search(r"\b(?:what|which|show|list|read|find|check|sync|open)\b", message))
+        return task_reference and data_action
+
+    def _is_explicit_google_classroom_request(self, message: str) -> bool:
+        classroom_reference = bool(re.search(r"\b(?:google classroom|classroom assignments|my assignments|my coursework|my courses)\b", message))
+        data_action = bool(re.search(r"\b(?:what|which|show|list|read|find|check|sync|open)\b", message))
+        return classroom_reference and data_action
 
     def _maybe_identity_memory_response(self, user_id: str, message: str) -> str | None:
         normalized = message.strip()
@@ -2013,19 +2187,29 @@ class CeaserOrchestrator:
     def _filter_calendar_events(self, events: list[dict], target_date: date) -> list[dict]:
         matched = []
         for event in events:
-            raw_start = event.get("start")
-            if not raw_start:
-                continue
-            try:
-                event_date = datetime.fromisoformat(raw_start.replace("Z", "+00:00")).date()
-            except ValueError:
-                try:
-                    event_date = date.fromisoformat(raw_start[:10])
-                except ValueError:
-                    continue
+            event_date = self._calendar_event_date(event.get("start"))
             if event_date == target_date:
                 matched.append(event)
         return matched
+
+    def _calendar_event_date(self, value: str | None) -> date | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+        except ValueError:
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+
+    def _format_calendar_date(self, value: date | None) -> str:
+        if value is None:
+            return "Date unavailable"
+        return f"{value.strftime('%A, %B')} {value.day}, {value.year}"
+
+    def _is_date_only_calendar_value(self, value: str | None) -> bool:
+        return bool(value and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
 
     def _format_calendar_time(self, value: str | None) -> str:
         if not value:
@@ -2083,10 +2267,36 @@ class CeaserOrchestrator:
         )
         return any(term in normalized for term in terms)
 
-    def _get_conversation(self, conversation_id: str | None) -> Conversation | None:
+    def _get_conversation(self, conversation_id: str | None, *, user_id: str | None = None) -> Conversation | None:
         if not conversation_id:
             return None
+        if user_id is not None:
+            conversation = self.db.query(Conversation).filter(
+                Conversation.id == conversation_id, Conversation.user_id == user_id,
+            ).first()
+            if conversation is None:
+                logger.error("Conversation not found for id %s and user %s", conversation_id, user_id)
+                raise ValueError("Conversation not found.")
+            return conversation
         return self.conversations.get(conversation_id)
+
+    def interrupt_stream_response(self, prepared: dict[str, Any], content: str) -> None:
+        """Persist the last visible prefix without duplicating an already-created turn."""
+        conversation_id = prepared.get("conversation_id")
+        if not conversation_id or prepared.get("mode") != "generate":
+            return
+        message_id = prepared.get("assistant_message_id")
+        message = self.db.get(Message, message_id) if message_id else None
+        if message is None:
+            message = self.begin_stream_response(prepared)
+        if message is not None:
+            # Never replace a longer durable prefix after interrupted worker work.
+            if len(content) > len(message.content or ""):
+                message.content = content
+            message.extra_metadata = {
+                **(message.extra_metadata or {}), "streaming": False, "status": "interrupted",
+            }
+            self.db.commit()
 
     def _conversation_context(self, conversation: Conversation | None) -> dict:
         if not conversation:
@@ -2110,7 +2320,7 @@ class CeaserOrchestrator:
         # Read only a compact slice of history so follow-up continuity stays
         # available without dragging the full conversation through every turn.
         messages = self.conversations.list_recent_messages(conversation_id=conversation.id, limit=8)
-        persisted_state = conversation.conversation_state or {}
+        persisted_state = TaskStateSchema.normalize(conversation.conversation_state or {})
         recent_messages = messages[-8:]
         generation_messages = messages[-4:]
         older_messages = messages[:-4]
@@ -2259,6 +2469,82 @@ class CeaserOrchestrator:
             query,
             include_images=self._should_include_research_images(query, selected_agent_names),
         )
+
+    def _execute_research(
+        self,
+        user_id: str,
+        message: str,
+        conversation_id: str | None,
+        conversation_context: dict | None,
+        query: str,
+        selected_agent_names: list[str],
+        should_run_research: bool,
+    ):
+        """Execute research using LangGraph Alex if enabled, otherwise use existing engine.
+
+        Phase 3: Conditional integration of LangGraph research agent.
+        Falls back to existing ResearchEngine if Alex fails or flag is disabled.
+        """
+        if not should_run_research:
+            return None
+
+        if not settings.enable_langgraph_research:
+            # Current path: existing research engine
+            return self._maybe_research(query, selected_agent_names)
+
+        # Phase 3: LangGraph Alex path with fallback
+        try:
+            from app.agents.langgraph.context_adapter import ContextAdapter
+            from app.agents.langgraph.factory import create_research_agent
+
+            # Build context from existing CEASER services
+            context_adapter = ContextAdapter(db=self.db)
+            research_context = context_adapter.build_research_context(
+                user_id=user_id,
+                query=query,
+                conversation_id=conversation_id,
+                message_limit=10,
+                memory_limit=5,
+            )
+
+            # Create and invoke LangGraph Alex
+            agent = create_research_agent(
+                db=self.db,
+                user_id=user_id,
+                initial_context=research_context,
+            )
+            result = agent.invoke(query)
+
+            # Convert LangGraph result to ResearchResult format
+            # The result contains: user_goal, messages, research_result, final_response
+            if result and result.get("research_result"):
+                research_data = result["research_result"]
+                from app.engines.research_engine.engine import ResearchResult
+
+                return ResearchResult(
+                    query=result.get("user_goal", query),
+                    summary=result.get("final_response", ""),
+                    sources=research_data.get("sources", []),
+                    key_findings=research_data.get("key_findings", []),
+                    citations=research_data.get("citations", []),
+                    images=research_data.get("images", []),
+                    timings=research_data.get("timings", {}),
+                )
+            return None
+        except Exception as e:
+            # Fallback: log safely and use existing research engine
+            logger.warning(
+                "LangGraph research failed, falling back to ResearchEngine",
+                extra={"error_type": type(e).__name__, "user_id": user_id},
+            )
+            try:
+                return self._maybe_research(query, selected_agent_names)
+            except Exception as fallback_error:
+                logger.error(
+                    "Fallback research also failed",
+                    extra={"error_type": type(fallback_error).__name__, "user_id": user_id},
+                )
+                return None
 
     @staticmethod
     def _generate_image_response(
@@ -2462,6 +2748,8 @@ class CeaserOrchestrator:
         }
 
     def _default_stream_agents(self, message: str) -> list[str]:
+        if not settings.agents_enabled:
+            return []
         selection = self.specialist_agents.select(message)
         if selection.route != "SPECIALIST":
             return []
@@ -2498,6 +2786,34 @@ class CeaserOrchestrator:
         if self._is_current_statistics_request(normalized):
             return self._current_statistics_query(normalized)
 
+        latest_release = re.search(
+            r"\b(?:latest|newest|most recent|new)\s+release\s+of\s+(?:the\s+)?(.+?)[?.!]*$",
+            normalized,
+            flags=re.I,
+        )
+        if latest_release:
+            subject = self._clean_research_query(latest_release.group(1))
+            return f"{subject} latest release official" if subject else normalized
+
+        corporate_event = re.search(
+            r"\b(.+?)\s+(?:acquisition|aquisition|acquired|acquire|buyout|merger|merged)\s+(?:of|with)?\s*(.+?)[?.!]*$",
+            normalized,
+            flags=re.I,
+        )
+        if corporate_event:
+            buyer = re.sub(r"^(?:do you know anything about|what do you know about|tell me about)\s+", "", corporate_event.group(1), flags=re.I).strip()
+            target = corporate_event.group(2).strip()
+            return f"{buyer} acquisition of {target} latest official"
+
+        emerging_model = re.search(
+            r"\b(?:gpt|got|gemini|claude|llama|grok|nemotron)\s*-?\s*\d+(?:\.\d+)?(?:\s+[A-Za-z][A-Za-z0-9_-]+)?",
+            normalized,
+            flags=re.I,
+        )
+        if emerging_model:
+            query = emerging_model.group(0).strip()
+            return re.sub(r"^got(?=\s*-?\s*\d)", "GPT", query, flags=re.I)
+
         topic_patterns = [
             r"\bresearch\s+(?:on|about)?\s*(.+?)(?:\s+and\s+(?:give|show|share|list)|\s+then\s+(?:give|show|share|list)|$)",
             r"\bdo\s+(?:some\s+)?research\s+(?:on|about)?\s*(.+?)(?:\s+and\s+(?:give|show|share|list)|\s+then\s+(?:give|show|share|list)|$)",
@@ -2511,6 +2827,19 @@ class CeaserOrchestrator:
                 cleaned = self._clean_research_query(match.group(1))
                 if cleaned:
                     return cleaned
+
+        if re.search(r"\b(?:latest|current|today|recent|this week|this month|this year|news|up to date)\b", normalized, flags=re.I):
+            current_query = re.sub(
+                r"^(?:what|who|when|where|why|how)\s+(?:do|does|did|is|are|was|were|can)\s+"
+                r"(?:you\s+)?(?:know\s+)?(?:anything\s+)?(?:about\s+)?",
+                "",
+                normalized,
+                flags=re.I,
+            )
+            current_query = re.sub(r"^(?:tell|show|give)\s+me\s+(?:about\s+)?", "", current_query, flags=re.I)
+            cleaned = self._clean_research_query(current_query)
+            if cleaned:
+                return cleaned
 
         name_match = re.search(r"\b(?:name|called)\s+([A-Z][A-Za-z0-9_-]{2,})\b", normalized)
         if name_match:
@@ -2569,11 +2898,72 @@ class CeaserOrchestrator:
         prefix = f"top {count} " if count else ""
         if "startups" in previous_query.lower() or "startup" in previous_query.lower():
             return f"{prefix}{previous_query}".strip()
-        return f"{prefix}startups from {previous_query}".strip()
+        if any(term in message.lower() for term in ("knowledge cutoff", "till which year", "up to date")):
+            return f"{previous_query} latest verified information 2026"
+        cleaned = self._clean_research_query(message)
+        return f"{prefix}{previous_query} {cleaned}".strip()
 
-    def _contextualize_follow_up(self, message: str, follow_up_trace: dict) -> str:
+    @staticmethod
+    def _previous_artifacts(conversation_context: dict) -> list[dict]:
+        """Extract artifacts from conversation messages for response planning."""
+        artifacts = []
+        for msg in reversed(conversation_context.get("messages", [])):
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content", "")
+            if "```" in content:
+                artifact_type = "code"
+                if "```html" in content or "```javascript" in content:
+                    artifact_type = "code"
+                elif "# " in content or "## " in content:
+                    artifact_type = "document"
+                artifacts.append({
+                    "id": f"artifact_{len(artifacts)}",
+                    "type": artifact_type,
+                    "format": "markdown",
+                    "content": content[:2000],
+                })
+        return artifacts
+
+    @staticmethod
+    def _response_plan_payload(plan) -> dict:
+        """Convert ResponsePlan to a serializable payload for the context."""
+        if plan is None:
+            return {}
+        from dataclasses import asdict
+        return asdict(plan) if hasattr(plan, "__dataclass_fields__") else {
+            "operation": str(plan.operation) if plan.operation else None,
+            "reference": plan.reference,
+            "target_artifact_id": plan.target_artifact_id,
+            "preserve_format": plan.preserve_format,
+            "output_mode": plan.output_mode,
+            "change_type": plan.change_type,
+            "constraints": plan.constraints,
+            "confidence": plan.confidence,
+        }
+
+    @staticmethod
+    def _non_generative_operation(plan_payload: dict) -> bool:
+        """Check if the operation should not generate new code."""
+        operation = plan_payload.get("operation", "")
+        return operation in {"EXPLAIN", "SUMMARIZE", "CLARIFY", "VERIFY"}
+
+    def _contextualize_follow_up(self, message: str, follow_up_trace: dict, response_plan: dict | None = None) -> str:
+        """Build contextualized follow-up message with response plan guidance."""
         if not follow_up_trace.get("follow_up_detected"):
             return message
+        operation = response_plan.get("operation") if response_plan else None
+        if operation in {"EXPLAIN", "SUMMARIZE", "CLARIFY"}:
+            if not (follow_up_trace.get("active_topic") or "").strip():
+                return message
+            topic = (follow_up_trace.get("active_topic") or "").strip()
+            subtopic = (follow_up_trace.get("active_subtopic") or "").strip()
+            focus = f" Focus on the {subtopic}." if subtopic else ""
+            return (
+                f"System instruction: Explain the active topic in {response_plan.get('constraints', {}).get('complexity', 'clear')} language without regenerating the entire artifact.{focus}\n"
+                f"Active topic: {topic}\n"
+                f"Current user message: {message}"
+            )
         topic = (follow_up_trace.get("active_topic") or "").strip()
         if not topic:
             return message
@@ -2867,6 +3257,7 @@ class CeaserOrchestrator:
         follow_up_trace: dict,
         previous_state: dict,
     ) -> None:
+        # --- Legacy field computation (unchanged behavior) ---
         active_topic = follow_up_trace.get("active_topic") or previous_state.get("active_topic")
         active_subtopic = follow_up_trace.get("active_subtopic") or previous_state.get("active_subtopic")
         entities = list(dict.fromkeys([
@@ -2879,7 +3270,21 @@ class CeaserOrchestrator:
             unfinished_goal = message[:240]
         if any(term in normalized for term in ("done", "finished", "complete the plan", "cancel")):
             unfinished_goal = None
-        state = {
+
+        # --- V1 state merge (deterministic, no network calls) ---
+        # Normalize previous state to V1 structure first
+        v1_state = TaskStateSchema.normalize(previous_state)
+
+        # Extract explicit user-provided state from the current message.
+        # This is purely local/deterministic (no LLM calls).
+        try:
+            v1_state = extract_user_state(message, v1_state)
+        except Exception:
+            # Never crash state persistence due to extraction failure
+            pass
+
+        # Merge updated legacy fields into V1 state
+        v1_state = merge_state(v1_state, {
             "active_topic": active_topic,
             "active_subtopic": active_subtopic,
             "active_task": message[:240],
@@ -2887,10 +3292,12 @@ class CeaserOrchestrator:
             "important_entities": entities,
             "important_decisions": previous_state.get("important_decisions") or [],
             "last_relevant_turn": message[:240],
-        }
+        })
+
+        # --- Summary (unchanged behavior) ---
         summary_parts = [
             f"Topic: {active_topic}" if active_topic else None,
-            f"Current task: {state['active_task']}",
+            f"Current task: {message[:240]}",
             f"Unfinished goal: {unfinished_goal}" if unfinished_goal else None,
             f"Entities: {', '.join(entities)}" if entities else None,
             f"Last response focus: {self._response_focus(response)}" if response else None,
@@ -2898,7 +3305,7 @@ class CeaserOrchestrator:
         self.conversations.update_state(
             conversation,
             summary=" | ".join(part for part in summary_parts if part)[:1200],
-            state=state,
+            state=v1_state,
         )
 
     @staticmethod
@@ -3054,3 +3461,35 @@ class CeaserOrchestrator:
             return LocalBoltDispatcher(self.db).dispatch(user, message, task_id=request_id)
         except (ValueError, RuntimeError):
             return {"status": "failed", "reason": "bolt_plan_invalid"}
+
+    def _build_integration_tools_context(self, user_id: str) -> dict:
+        """Build integration tools context for LLM tool calling.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            Context dict with integration_tools key if tools available
+        """
+        from app.services.integrations.integration_tool_service import IntegrationToolService
+        from app.intelligence.ai.model_router.models import ToolDefinition
+
+        tool_service = IntegrationToolService(self.db)
+        tools = tool_service.get_available_tools(user_id)
+
+        if not tools:
+            return {}
+
+        # Convert to OpenAI-compatible tool format
+        tool_defs = []
+        for t in tools:
+            tool_defs.append({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            })
+
+        return {"integration_tools": tool_defs}

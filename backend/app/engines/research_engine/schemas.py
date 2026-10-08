@@ -38,3 +38,4 @@ class ResearchResult(BaseModel):
     sources: list[ResearchSource]
     citations: list[Citation]
     images: list[ResearchImage] = Field(default_factory=list)
+    timings: dict[str, float] = Field(default_factory=dict)

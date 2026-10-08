@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -25,23 +26,29 @@ class MemoryCapture:
         return self._store_candidates(user_id=user_id, candidates=candidates)
 
     def _store_candidates(self, user_id: str, candidates: list[dict]) -> list[dict]:
+        from app.services.memory_service import MemoryService
+
         stored = []
+        service = MemoryService(self.db)
         for candidate in candidates:
-            existing = self.memories.find_exact(
-                user_id=user_id,
-                memory_type=candidate["memory_type"],
-                content=candidate["content"],
-            )
-            if existing:
-                continue
-            memory = self.memories.create(
+            expires_at = candidate.get("expires_at")
+            if not expires_at and candidate["memory_type"] == "conversation" and candidate["content"].startswith("Recent request:"):
+                expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            memory = service.create(
                 user_id=user_id,
                 memory_type=candidate["memory_type"],
                 content=candidate["content"],
                 metadata={
                     "confidence_score": candidate["confidence_score"],
                     "source": "ceaser_orchestrator",
+                    "importance": candidate.get("importance", candidate["confidence_score"]),
+                    "reinforcement_count": 1,
+                    "access_count": 0,
+                    "status": "active",
+                    "last_accessed_at": None,
+                    "expires_at": expires_at,
                 },
+                commit=False,
             )
             stored.append(
                 {
@@ -68,19 +75,17 @@ class MemoryCapture:
             (r"\bremember that (.+)", "conversation", "{value}", 0.75),
             (r"\bwe decided to (.+)", "decision", "Decision: {value}", 0.8),
             (r"\bmy goal is (.+)", "goal", "Goal: {value}", 0.8),
+            (r"\bremember that (?:my )?(.+?) (?:is|are|is kept|are kept) in (?:the )?(.+)", "file", "{key} is in {value}", 0.96),
         ]
         candidates = []
         for pattern, memory_type, template, confidence in rules:
             match = re.search(pattern, message, flags=re.IGNORECASE)
             if match:
-                value = match.group(1).strip().rstrip(".")
-                candidates.append(
-                    {
-                        "memory_type": memory_type,
-                        "content": template.format(value=value),
-                        "confidence_score": confidence,
-                    }
-                )
+                groups = [group.strip().rstrip(".") for group in match.groups()]
+                content = template.format(key=groups[0], value=groups[-1]) if "{key}" in template else template.format(value=groups[0])
+                candidates.append({"memory_type": memory_type, "content": content, "confidence_score": confidence})
+        if any(candidate["memory_type"] == "file" for candidate in candidates):
+            candidates = [candidate for candidate in candidates if candidate["memory_type"] != "conversation"]
         unique: dict[tuple[str, str], dict] = {}
         for candidate in candidates:
             key = (candidate["memory_type"], candidate["content"].lower())

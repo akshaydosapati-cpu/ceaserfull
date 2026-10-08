@@ -9,10 +9,12 @@ from typing import Any
 from app.intelligence.ai.sync import generate_text_sync, stream_text
 from app.intelligence.ai.model_router import request_for_agent, request_for_agents, request_for_chat
 from app.services.llm.provider import LLMProvider
+from app.services.orchestrator.completeness_validator import CompletenessValidator
 
 
 class ResponsePipeline:
     MAX_CODE_CONTINUATIONS = 2
+    MAX_CHAT_CONTINUATIONS = 2
 
     def __init__(self, provider: LLMProvider | None = None):
         self.provider = provider
@@ -20,6 +22,7 @@ class ResponsePipeline:
     def generate(self, message: str, context: dict) -> str:
         instructions, context_text = self._build_prompt(message=message, context=context)
         model_request = self._model_request(message=message, context=context, streaming=False, context_text=context_text)
+
         try:
             response = generate_text_sync(instructions=instructions, input_text=context_text, model_request=model_request)
             return self.normalize_structured_response(response, project_report=self._is_project_report_context(context)) if self.requires_structured_response(context) else response
@@ -29,6 +32,46 @@ class ResponsePipeline:
             return "AI service is temporarily unavailable. Please try again later."
 
     async def stream(self, message: str, context: dict, *, trace: dict[str, Any] | None = None) -> AsyncIterator[str]:
+        response_plan = context.get("response_plan", {})
+        operation = response_plan.get("operation")
+        if operation in {"EXPLAIN", "SUMMARIZE", "CLARIFY"}:
+            async for chunk in self._stream_non_generative(message, context, trace):
+                yield chunk
+        else:
+            async for chunk in self._stream_generative(message, context, trace):
+                yield chunk
+    async def _stream_non_generative(self, message: str, context: dict, trace: dict[str, Any] | None) -> AsyncIterator[str]:
+        """Stream EXPLAIN/SUMMARIZE/CLARIFY responses without regenerating code artifacts."""
+        prompt_started = perf_counter()
+        instructions, context_text = self._build_prompt(message=message, context=context)
+        model_request = self._model_request(message=message, context=context, streaming=True, context_text=context_text)
+        output_budget = self._stream_output_budget(message=message, context=context)
+
+        # Get operation from response plan to determine if we need special instructions
+        response_plan = context.get("response_plan", {})
+        operation = response_plan.get("operation", "")
+
+        if trace is not None:
+            trace["context_tokens"] = self._estimate_tokens(f"{instructions}\n\n{context_text}")
+            trace["prompt_tokens"] = trace["context_tokens"]
+            trace["prompt_build_ms"] = round((perf_counter() - prompt_started) * 1000, 2)
+            trace["max_output_tokens"] = output_budget
+            trace["is_non_generative_operation"] = True
+
+        # For non-generative operations, guide the model to explain without regenerating
+        if operation in {"EXPLAIN", "SUMMARIZE", "CLARIFY"}:
+            constraint_msg = {
+                "EXPLAIN": "Provide a clear, direct explanation without generating new code. Reference the existing code by describing its parts, not by recreating it.",
+                "SUMMARIZE": "Provide a concise summary without regenerating the original artifact.",
+                "CLARIFY": "Ask for clarification about what is unclear, without regenerating the original artifact.",
+            }.get(operation, "Provide a clear explanation without regenerating artifacts.")
+
+            instructions = f"{instructions}\n\nIMPORTANT: {constraint_msg}"
+
+        async for chunk in stream_text(instructions=instructions, input_text=context_text, max_output_tokens=output_budget, trace=trace, model_request=model_request):
+            yield chunk
+
+    async def _stream_generative(self, message: str, context: dict, trace: dict[str, Any] | None) -> AsyncIterator[str]:
         prompt_started = perf_counter()
         instructions, context_text = self._build_prompt(message=message, context=context)
         model_request = self._model_request(message=message, context=context, streaming=True, context_text=context_text)
@@ -42,7 +85,8 @@ class ResponsePipeline:
         async for chunk in stream_text(instructions=instructions, input_text=context_text, max_output_tokens=output_budget, trace=trace, model_request=model_request):
             emitted.append(chunk)
             yield chunk
-        if trace is not None and emitted and self._is_code_request(message, context):
+        is_code_request = self._is_code_request(message, context)
+        if trace is not None and emitted and is_code_request:
             continuation_count = 0
             artifact_type = self._artifact_type(message)
             structural_complete = self._artifact_is_complete("".join(emitted), artifact_type)
@@ -103,6 +147,91 @@ class ResponsePipeline:
                 closing_fence = "\n```"
                 emitted.append(closing_fence)
                 yield closing_fence
+        elif trace is not None and emitted:
+            continuation_count = 0
+            length_limit_detected = trace.get("finish_reason") in {"length", "max_tokens", "token_limit"}
+            
+            # Extract requirements and validate completeness for structured requests
+            requirements = CompletenessValidator.extract_requirements(message)
+            has_structural_requirements = bool(requirements)
+            
+            while length_limit_detected and continuation_count < self.MAX_CHAT_CONTINUATIONS:
+                continuation_count += 1
+                continuation_trace: dict[str, Any] = {}
+                partial = "".join(emitted)
+                continuation_input = (
+                    f"Original user request:\n{message}\n\n"
+                    f"Tail of the answer already shown to the user:\n{partial[-8000:]}\n\n"
+                    "Continue exactly where the answer stopped. Do not repeat earlier text, headings, or list items. "
+                    "Preserve the same format and finish the complete answer. Output only the continuation."
+                )
+                segment_emitted = False
+                async for chunk in stream_text(
+                    instructions=instructions,
+                    input_text=continuation_input,
+                    max_output_tokens=output_budget,
+                    trace=continuation_trace,
+                    model_request=model_request,
+                ):
+                    if chunk:
+                        segment_emitted = True
+                        emitted.append(chunk)
+                        yield chunk
+                trace["finish_reason"] = continuation_trace.get("finish_reason")
+                trace["continuation_used"] = True
+                trace["continuation_count"] = continuation_count
+                trace["continuation_finish_reason"] = continuation_trace.get("finish_reason")
+                trace["continuation_reason"] = "LENGTH_LIMIT"
+                length_limit_detected = trace.get("finish_reason") in {"length", "max_tokens", "token_limit"}
+                trace["length_limit_detected"] = length_limit_detected
+                if not segment_emitted:
+                    break
+            
+            # After continuation loop, validate completeness for requests with structural requirements
+            if has_structural_requirements:
+                full_content = "".join(emitted)
+                validation = CompletenessValidator.validate(
+                    message, full_content, continuation_count, self.MAX_CHAT_CONTINUATIONS
+                )
+                trace["completeness_validation"] = {
+                    "is_complete": validation.is_complete,
+                    "requirements_satisfied": validation.requirements_satisfied,
+                    "is_truncated": validation.is_truncated,
+                    "is_mid_sentence": validation.is_mid_sentence,
+                    "has_duplicates": validation.has_duplicates,
+                    "partial_status": validation.partial_status,
+                    "issues": validation.issues,
+                }
+                if not validation.is_complete and validation.partial_status:
+                    trace["structural_completion_blocked"] = True
+                    trace["partial_status"] = validation.partial_status
+            
+            if length_limit_detected:
+                trace["continuation_limit_reached"] = True
+
+    @staticmethod
+    def _build_continuation_input(message: str, partial: str, requirements: list) -> str:
+        """Build smarter continuation input based on extracted requirements."""
+        base_input = (
+            f"Original user request: {message}\n\n"
+            f"Tail of the answer already shown to the user: {partial[-8000:]}\n\n"
+            "Continue exactly where the answer stopped. Do not repeat earlier text, headings, or list items. "
+            "Preserve the same format and finish the complete answer. Output only the continuation."
+        )
+
+        # Add specific hints based on requirements
+        if requirements:
+            hints = []
+            for req in requirements:
+                found = CompletenessValidator.count_structures(partial, req.type)
+                if req.count and found < req.count:
+                    remaining = req.count - found
+                    hints.append(f"You still need to add {remaining} more {req.type}.")
+
+            if hints:
+                base_input += " " + " ".join(hints)
+
+        return base_input
 
     @staticmethod
     def _is_code_request(message: str, context: dict) -> bool:
@@ -139,8 +268,7 @@ class ResponsePipeline:
         normalized = re.sub(r"^\s*```(?:html|javascript|js|css)?\s*", "", chunk, count=1, flags=re.I)
         return re.sub(r"\s*```(?:html|javascript|js|css)?\s*$", "", normalized, count=1, flags=re.I)
 
-    @staticmethod
-    def _model_request(*, message: str, context: dict, streaming: bool, context_text: str):
+    def _model_request(self, *, message: str, context: dict, streaming: bool, context_text: str):
         merged = context.get("merged_contributions", {}) if isinstance(context, dict) else {}
         selected = merged.get("selected_agents", []) if isinstance(merged, dict) else []
         preferred_model = str(context.get("model_preference") or "").strip() or None
@@ -151,7 +279,12 @@ class ResponsePipeline:
         if ResponsePipeline._is_code_request(message, context):
             return request_for_agent("bolt", streaming=streaming, context_size_estimate=max(1, len(context_text) // 4), preferred_model_ids=preferred_model_ids or None)
         task_type = "reasoning" if any(term in normalized for term in ("compare", "strategy", "analyze", "analyse", "trade-off", "why")) else "general"
-        return request_for_chat(streaming=streaming, context_size_estimate=max(1, len(context_text) // 4), task_type=task_type, preferred_model_ids=preferred_model_ids or None)
+        return self._model_request_with_tools(
+            message=message,
+            context=context,
+            streaming=streaming,
+            context_text=context_text,
+        )
 
     @staticmethod
     def _stream_output_budget(*, message: str, context: dict) -> int:
@@ -200,6 +333,10 @@ class ResponsePipeline:
                 f"Older conversation summary: {conversation_summary}",
             ]
         )
+        persisted_state = context.get("persisted_state") or {}
+        state_context = self._build_state_context(persisted_state)
+        if state_context:
+            continuity_context = continuity_context + "\n\n" + state_context
         research = context.get("research_result")
         merged_contributions = context.get("merged_contributions", {}) or {}
         selected_agents = merged_contributions.get("selected_agents", []) if isinstance(merged_contributions, dict) else []
@@ -499,6 +636,65 @@ class ResponsePipeline:
             return "Return a detailed but easy-to-understand explanation with headings, bullets, examples, and final summary."
         return "Use concise or standard detail based on the request."
 
+    @staticmethod
+    def _build_state_context(persisted_state: dict) -> str:
+        """Build a compact state context string for injection into the prompt.
+
+        Only surfaces active items. Filters deprecated entries.
+        Does NOT expose raw provenance IDs.
+        Returns empty string when state has no meaningful V1 content.
+        """
+        if not persisted_state or not isinstance(persisted_state, dict):
+            return ""
+
+        # Only include if V1 structure is present
+        if "schema_version" not in persisted_state:
+            return ""
+
+        parts: list[str] = []
+
+        def _active(items: list) -> list:
+            return [
+                i for i in (items or [])
+                if isinstance(i, dict) and i.get("status") != "deprecated"
+            ]
+
+        constraints = _active(persisted_state.get("constraints", []))
+        if constraints:
+            lines = [f"  - [{c.get('category', 'general')}] {c.get('description', '')}" for c in constraints[:6]]
+            parts.append("User constraints:\n" + "\n".join(lines))
+
+        facts = _active(persisted_state.get("facts", []))
+        if facts:
+            lines = [f"  - {f.get('content', '')}" for f in facts[:5]]
+            parts.append("Known facts:\n" + "\n".join(lines))
+
+        goals = _active(persisted_state.get("goals", []))
+        if goals:
+            lines = [f"  - {g.get('content', '')}" for g in goals[:4]]
+            parts.append("Goals:\n" + "\n".join(lines))
+
+        decisions = _active(persisted_state.get("decisions", []))
+        if decisions:
+            lines = [f"  - {d.get('content', '')}" for d in decisions[:4]]
+            parts.append("Decisions made:\n" + "\n".join(lines))
+
+        entities = persisted_state.get("entities", []) or []
+        active_entities = [e for e in entities if isinstance(e, dict)]
+        if active_entities:
+            names = [f"{e.get('name', '')} ({e.get('type', '')})" for e in active_entities[:6]]
+            parts.append("Key entities: " + ", ".join(n for n in names if n.strip()))
+
+        open_questions = _active(persisted_state.get("open_questions", []))
+        if open_questions:
+            lines = [f"  - {q.get('content', q.get('question', ''))}" for q in open_questions[:3]]
+            parts.append("Open questions:\n" + "\n".join(lines))
+
+        if not parts:
+            return ""
+
+        return "Conversation state (active only):\n" + "\n\n".join(parts)
+
     def _estimate_tokens(self, text: str) -> int:
         return max(1, round(len(text) / 4))
 
@@ -516,3 +712,69 @@ class ResponsePipeline:
                 }
             )
         return compact
+
+    def _build_tool_routing_rule(self) -> str:
+        """Rule for tool usage in LLM responses."""
+        return (
+            "TOOL USAGE RULE: You can use tools to access integrations. "
+            "Available tools are provided in the 'tools' field. When calling a tool, "
+            "return a JSON object with: {\"tool_name\": \"name\", \"arguments\": {\"key\": \"value\"}}. "
+            "For read-only operations, execute directly. For write operations that modify state, "
+            "confirm with the user before proceeding. "
+            "After tool execution, integrate results naturally into your response."
+        )
+
+    def _extract_tools_from_context(self, context: dict) -> list[dict] | None:
+        """Extract tool definitions from context if available.
+
+        Args:
+            context: Request context containing integration tools
+
+        Returns:
+            List of tool definitions or None if no tools available
+        """
+        if not isinstance(context, dict):
+            return None
+
+        tools = context.get("integration_tools")
+        if tools and isinstance(tools, list):
+            return tools
+
+        return None
+
+    def _model_request_with_tools(
+        self,
+        *,
+        message: str,
+        context: dict,
+        streaming: bool,
+        context_text: str,
+    ) -> Any:
+        """Build model request with tools if available.
+
+        Args:
+            message: User message
+            context: Request context
+            streaming: Whether streaming is enabled
+            context_text: Context text to include
+
+        Returns:
+            ModelRequest with tools if available
+        """
+        from app.intelligence.ai.model_router import request_for_chat
+        from app.intelligence.ai.model_router.request_builder import request_with_tools
+
+        # Get base model request
+        model_request = request_for_chat(
+            streaming=streaming,
+            context_size_estimate=max(1, len(context_text) // 4),
+        )
+
+        # Check if tools are available in context
+        tools = self._extract_tools_from_context(context)
+
+        if tools:
+            # Add tools to request
+            return request_with_tools(model_request, tools)
+
+        return model_request

@@ -26,6 +26,9 @@ class AutomationScheduler:
         query = query.order_by(Automation.next_run_at.asc())
         if limit:
             query = query.limit(limit)
+        # Use PostgreSQL row-level locking to prevent duplicate execution across concurrent workers.
+        if self.db.bind and self.db.bind.dialect.name == "postgresql":
+            query = query.with_for_update(skip_locked=True)
         return query.all()
 
     def run_due(self, user_id: str | None = None, limit: int | None = None) -> list:

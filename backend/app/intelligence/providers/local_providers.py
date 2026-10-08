@@ -26,7 +26,7 @@ class MemoryProvider(KnowledgeProvider):
     async def retrieve(self, *, request: RequestContext, plan: ProviderPlan) -> list[ContextItem]:
         memories = self.db.query(Memory).filter(Memory.user_id == request.user_id).order_by(Memory.created_at.desc()).limit(plan.limit * 3).all()
         query_terms = _terms(plan.query.lower())
-        filtered = [memory for memory in memories if not query_terms or any(term in memory.content.lower() for term in query_terms)]
+        filtered = [memory for memory in memories if memory.extra_metadata.get("status", "active") == "active" and (not query_terms or any(term in memory.content.lower() for term in query_terms))]
         return [
             ContextItem(
                 id=memory.id,
@@ -164,4 +164,3 @@ class FileMetadataProvider(KnowledgeProvider):
             )
             for file in files
         ]
-

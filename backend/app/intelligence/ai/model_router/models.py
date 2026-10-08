@@ -71,6 +71,13 @@ class ModelDefinition(BaseModel):
         return self.model_dump(exclude={"metadata"}) | {"metadata": {k: v for k, v in self.metadata.items() if "key" not in k.lower() and "secret" not in k.lower()}}
 
 
+class ToolDefinition(BaseModel):
+    """Definition of an LLM-callable tool (OpenAI-compatible)."""
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
 class ModelRequest(BaseModel):
     request_id: str
     task_type: str = "general"
@@ -80,6 +87,7 @@ class ModelRequest(BaseModel):
     preferred_model_ids: frozenset[str] = frozenset()
     context_size_estimate: int = Field(default=0, ge=0)
     needs_tools: bool = False
+    tools: list[ToolDefinition] | None = None  # Tool definitions for tool calling
     needs_vision: bool = False
     needs_streaming: bool = False
     latency_preference: int = Field(default=5, ge=1, le=10)

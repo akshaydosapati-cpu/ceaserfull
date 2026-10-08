@@ -19,6 +19,10 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://postgres:postgres@localhost:5432/ceaser",
         validation_alias=AliasChoices("DATABASE_URL", "database_url"),
     )
+    database_pool_size: int = Field(default=10, alias="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=20, alias="DATABASE_MAX_OVERFLOW")
+    database_pool_timeout_seconds: float = Field(default=5.0, alias="DATABASE_POOL_TIMEOUT_SECONDS")
+    database_pool_recycle_seconds: int = Field(default=1800, alias="DATABASE_POOL_RECYCLE_SECONDS")
     supabase_url: str | None = Field(default=None, validation_alias=AliasChoices("SUPABASE_URL", "supabase_url"))
     supabase_anon_key: str | None = Field(default=None, validation_alias=AliasChoices("SUPABASE_ANON_KEY", "supabase_anon_key"))
     supabase_service_role_key: str | None = Field(default=None, validation_alias=AliasChoices("SUPABASE_SERVICE_ROLE_KEY", "supabase_service_role_key"))
@@ -28,9 +32,9 @@ class Settings(BaseSettings):
     dev_auth_bypass: bool = Field(default=False, alias="DEV_AUTH_BYPASS")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     llm_provider: str = Field(default="openai", alias="LLM_PROVIDER")
-    # OpenAI is CEASER's primary generation provider. The ordered list is used
-    # by every production generation path; later providers are failover only.
-    llm_provider_order_raw: str = Field(default="nvidia,huggingface,openai,groq,gemini", alias="LLM_PROVIDER_ORDER")
+    # Provider order is a health-aware preference hint. Capability constraints
+    # still keep coding and specialist workloads on their eligible pools.
+    llm_provider_order_raw: str = Field(default="gemini,huggingface,nvidia,openai,groq", alias="LLM_PROVIDER_ORDER")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     nvidia_api_key: str | None = Field(default=None, alias="NVIDIA_API_KEY")
     nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
@@ -210,8 +214,13 @@ class Settings(BaseSettings):
     credit_pro_monthly: int = Field(default=5000, alias="CREDIT_PRO_MONTHLY")
     credit_referral_reward: int = Field(default=500, alias="CREDIT_REFERRAL_REWARD")
     credit_referral_monthly_cap: int = Field(default=10, alias="CREDIT_REFERRAL_MONTHLY_CAP")
+    tts_rate_limit_requests: int = Field(default=10, alias="CEASER_TTS_RATE_LIMIT_REQUESTS")
+    tts_rate_limit_window_seconds: int = Field(default=60, alias="CEASER_TTS_RATE_LIMIT_WINDOW_SECONDS")
+    tts_max_text_length: int = Field(default=4000, alias="CEASER_TTS_MAX_TEXT_LENGTH")
     credit_costs_raw: str = Field(default='{"ai_conversation":2,"research":10,"agent_workflow":20,"bolt_development":30,"local_command":0}', alias="CREDIT_COSTS_JSON")
     admin_emails_raw: str = Field(default="", alias="ADMIN_EMAILS")
+    enable_langgraph_research: bool = Field(default=False, alias="ENABLE_LANGGRAPH_RESEARCH")
+    agents_enabled: bool = Field(default=False, alias="CEASER_AGENTS_ENABLED")
 
     @property
     def cors_origins(self) -> list[str]:

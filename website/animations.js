@@ -22,24 +22,14 @@
       document.querySelectorAll(".badge-soon").forEach(function (el) {
         el.innerHTML = '<span class="dot" aria-hidden="true"></span>Live Now';
       });
-      document.querySelectorAll(".nav-right").forEach(function (navRight) {
-        if (!navRight.querySelector("[data-live-console]")) {
-          var link = document.createElement("a");
-          link.href = "/console/";
-          link.className = "btn btn-primary btn-sm";
-          link.setAttribute("data-live-console", "true");
-          link.textContent = "Console";
-          navRight.appendChild(link);
-        }
-      });
       document.querySelectorAll(".nav-center, .mobile-menu .container").forEach(function (nav) {
         nav.innerHTML = [
-          '<a href="#experience">Try CEASER</a>',
+          '<a href="#companion">Try NIX</a>',
           '<a href="#features">Capabilities</a>',
           '<a href="#use-cases">Use Cases</a>',
           '<a href="#companion">Companion</a>',
-          '<a href="#students">Students</a>',
-          '<a href="#pricing" data-feature="pricing">Pricing</a>'
+          '<a href="/about/">About</a>',
+          '<a href="/founders/">Founders</a>'
         ].join("");
       });
     } else if (post) {
@@ -153,6 +143,71 @@
   document.querySelectorAll(".wf-card").forEach(function (el, i) {
     el.style.animationDelay = 0.15 + i * 0.18 + "s";
   });
+
+  /* -------- NIX hero intro overlay -------- */
+  (function applyNixIntro() {
+    var overlay = document.getElementById("nix-intro-overlay");
+    var btn = document.getElementById("try-nix-btn");
+    if (!overlay || !btn) return;
+
+    // Play-time (ms). Your animated logo is looped, so after this duration
+    // we let the hero section take over.
+    var PLAY_MS = 5000;
+
+    function relocateLogoIntoHero() {
+      var stage = document.getElementById("nix-logo-stage");
+      var frame = document.getElementById("nix-intro-frame");
+      if (!stage || !frame) return;
+
+      // Replace any previous logo content in the hero stage.
+      stage.innerHTML = "";
+      stage.setAttribute("aria-hidden", "false");
+
+      frame.setAttribute("aria-hidden", "false");
+      frame.classList.remove("nix-anim-root");
+      frame.classList.add("nix-logo-iframe");
+      stage.appendChild(frame);
+    }
+
+    function showExperience() {
+      // Hide intro overlay
+      overlay.setAttribute("aria-hidden", "true");
+      // Reveal hero content smoothly
+      document.documentElement.classList.remove("nix-intro");
+    }
+
+    function activateNix() {
+      // Move the running intro animation into the hero section first.
+      // (This prevents a brief blank state while we remove the nix-intro hiding.)
+      relocateLogoIntoHero();
+
+      // Hide overlay + reveal hero content.
+      overlay.setAttribute("aria-hidden", "true");
+      document.documentElement.classList.remove("nix-intro");
+
+      // Mark for later desktop-companion wiring.
+      document.documentElement.setAttribute("data-nix-activated", "true");
+    }
+
+    // Start in intro mode
+    overlay.setAttribute("aria-hidden", "false");
+    var introFrame = document.getElementById("nix-intro-frame");
+    if (introFrame) introFrame.setAttribute("aria-hidden", "false");
+    document.documentElement.classList.add("nix-intro");
+
+    // Auto-transition after logo play time
+    var t = window.setTimeout(function () {
+      // Remove intro hiding
+      document.documentElement.classList.remove("nix-intro");
+      activateNix();
+    }, PLAY_MS);
+
+    btn.addEventListener("click", function () {
+      // If user clicks early, skip to experience immediately.
+      window.clearTimeout(t);
+      activateNix();
+    });
+  })();
 
   /* -------- Countdown (used on gate page + launch section) -------- */
   function startCountdown(root) {

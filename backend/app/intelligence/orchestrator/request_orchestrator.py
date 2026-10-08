@@ -65,6 +65,14 @@ class RequestOrchestrator:
             started = perf_counter()
             try:
                 result = await llm.generate(instructions=instructions, input_text=input_text)
+                if not isinstance(result, str) or not result.strip():
+                    raise AIServiceUnavailableError(
+                        "Provider returned no usable text.",
+                        retryable=True,
+                        provider=provider_name,
+                        category="empty_output",
+                    )
+                result = result.strip()
                 self.last_llm_provider_name = provider_name
                 logger.info("AI provider succeeded: provider=%s total_ms=%s", provider_name, round((perf_counter() - started) * 1000))
                 return result

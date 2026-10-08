@@ -23,8 +23,18 @@ class StorageService:
         return f"local://{storage_path}"
 
     def resolve(self, storage_path: str) -> Path:
+        if storage_path.startswith("bundled://"):
+            root = (BACKEND_ROOT / "app" / "assets" / "certificates").resolve()
+            candidate = (root / storage_path.removeprefix("bundled://")).resolve()
+            if root not in candidate.parents or not candidate.is_file():
+                raise FileNotFoundError(storage_path)
+            return candidate
         if storage_path.startswith("local://"):
-            return self.local_root / storage_path.replace("local://", "", 1)
+            root = self.local_root.resolve()
+            candidate = (root / storage_path.replace("local://", "", 1)).resolve()
+            if root not in candidate.parents:
+                raise PermissionError("invalid_storage_path")
+            return candidate
         if storage_path.startswith("supabase://"):
             content = self._download_from_supabase(storage_path)
             cache_path = self.local_root / "_cache" / self._safe_filename(storage_path)

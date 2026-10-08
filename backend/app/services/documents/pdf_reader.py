@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pypdf import PdfReader
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 from app.services.documents.schemas import ExtractedDocument
 
 
 class PDFReader:
     def read(self, path: Path) -> ExtractedDocument:
+        if PdfReader is None:
+            return ExtractedDocument(title=path.stem, pages=0, content="", metadata={"reader": "unavailable"})
         reader = PdfReader(str(path))
         chunks = []
         for page in reader.pages:

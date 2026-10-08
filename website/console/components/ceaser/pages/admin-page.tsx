@@ -5,6 +5,7 @@ import { adminApi, type AdminOverview } from "@/lib/api/admin"
 import { AlertTriangle, Download, IndianRupee, RefreshCw, ShieldCheck, Users, Wallet, Activity, FolderKanban, FileText } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { InternshipsAdmin } from "./internships-admin"
 
 const metricMeta: Record<string, { label: string; icon: LucideIcon }> = {
   users: { label: "Total Users", icon: Users },
@@ -24,6 +25,7 @@ export function AdminPage() {
   const [overview, setOverview] = useState<AdminOverview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [section, setSection] = useState<"overview" | "internships">("overview")
 
   async function load() {
     setLoading(true)
@@ -67,6 +69,13 @@ export function AdminPage() {
           Refresh
         </button>
       </div>
+
+      <div className="inline-flex rounded-md border border-white/10 bg-white/[0.03] p-1">
+        <button onClick={() => setSection("overview")} className={cn("rounded px-4 py-2 text-sm", section === "overview" && "bg-white/10")}>Overview</button>
+        <button onClick={() => setSection("internships")} className={cn("rounded px-4 py-2 text-sm", section === "internships" && "bg-white/10")}>Internships</button>
+      </div>
+
+      {section === "internships" ? <InternshipsAdmin /> : <>
 
       {error && (
         <div className="flex items-center gap-3 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-100">
@@ -133,6 +142,7 @@ export function AdminPage() {
           />
         </Panel>
       </div>
+      </>}
     </div>
   )
 }

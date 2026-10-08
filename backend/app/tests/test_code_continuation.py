@@ -56,10 +56,14 @@ def test_multiple_length_limits_are_bounded(monkeypatch):
     assert calls == 3
 
 
-def test_ordinary_chat_does_not_continue(monkeypatch):
+def test_ordinary_chat_continues_when_provider_reaches_length_limit(monkeypatch):
+    calls = 0
+
     async def fake_stream_text(*, trace=None, **kwargs):
-        trace["finish_reason"] = "length"
-        yield "short answer"
+        nonlocal calls
+        calls += 1
+        trace["finish_reason"] = "length" if calls == 1 else "stop"
+        yield "first part" if calls == 1 else " and the completed answer"
 
     monkeypatch.setattr(pipeline_module, "stream_text", fake_stream_text)
     trace = {}
@@ -69,7 +73,23 @@ def test_ordinary_chat_does_not_continue(monkeypatch):
         )]
     chunks = asyncio.run(run())
 
-    assert chunks == ["short answer"]
+    assert "".join(chunks) == "first part and the completed answer"
+    assert trace["continuation_count"] == 1
+    assert trace["finish_reason"] == "stop"
+
+
+def test_short_ordinary_chat_does_not_continue(monkeypatch):
+    async def fake_stream_text(*, trace=None, **kwargs):
+        trace["finish_reason"] = "stop"
+        yield "complete answer"
+
+    monkeypatch.setattr(pipeline_module, "stream_text", fake_stream_text)
+    trace = {}
+
+    async def run():
+        return [chunk async for chunk in ResponsePipeline().stream("Explain recursion simply.", {}, trace=trace)]
+
+    assert asyncio.run(run()) == ["complete answer"]
     assert "continuation_count" not in trace
 
 

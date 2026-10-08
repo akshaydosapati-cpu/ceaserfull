@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config.settings import settings
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.models.integration import Integration
 from app.core.security.dependencies import get_current_user
 from app.models.user import User
@@ -17,6 +18,27 @@ from app.services.integrations import IntegrationManager
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 logger = logging.getLogger(__name__)
+
+
+def _apply_notion_webhook(db: Session, workspace_id: str | None, event_type: str | None, entity: dict | object) -> int:
+    integrations = db.query(Integration).filter(Integration.provider == "notion", Integration.status == "connected").all()
+    touched = 0
+    for integration in integrations:
+        metadata = integration.metadata_json or {}
+        if workspace_id and metadata.get("workspace_id") and metadata.get("workspace_id") != workspace_id:
+            continue
+        integration.metadata_json = {
+            **metadata,
+            "notion_webhook_stale": True,
+            "notion_webhook_last_event": {
+                "type": event_type,
+                "workspace_id": workspace_id,
+                "entity": entity if isinstance(entity, dict) else {},
+            },
+        }
+        touched += 1
+    db.commit()
+    return touched
 
 
 def manager(db: Session) -> IntegrationManager:
@@ -129,23 +151,6 @@ async def notion_webhook(
     workspace_id = payload.get("workspace_id") if isinstance(payload, dict) else None
     event_type = payload.get("type") if isinstance(payload, dict) else None
     entity = payload.get("entity") if isinstance(payload, dict) else {}
-    query = db.query(Integration).filter(Integration.provider == "notion", Integration.status == "connected")
-    integrations = query.all()
-    touched = 0
-    for integration in integrations:
-        metadata = integration.metadata_json or {}
-        if workspace_id and metadata.get("workspace_id") and metadata.get("workspace_id") != workspace_id:
-            continue
-        integration.metadata_json = {
-            **metadata,
-            "notion_webhook_stale": True,
-            "notion_webhook_last_event": {
-                "type": event_type,
-                "workspace_id": workspace_id,
-                "entity": entity if isinstance(entity, dict) else {},
-            },
-        }
-        touched += 1
-    db.commit()
+    touched = await run_serial_db(_apply_notion_webhook, db, workspace_id, event_type, entity)
     logger.info("Notion webhook processed event_type=%s stale_integrations=%s", event_type, touched)
     return {"received": True, "stale_integrations": touched}

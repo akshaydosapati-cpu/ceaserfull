@@ -452,3 +452,22 @@ button[data-loading="true"]::after {
 ::-webkit-scrollbar-thumb:hover {
   background: oklch(0.4 0.02 250);
 }
+
+@media (max-width: 767px) {
+  .ceaser-product-shell .ceaser-app-frame {
+    min-width: 0;
+  }
+
+  .ceaser-product-shell main {
+    min-width: 0;
+  }
+
+  .ceaser-chat pre,
+  .ceaser-chat code {
+    max-width: 100%;
+  }
+
+  .ceaser-chat pre {
+    overflow-x: auto;
+  }
+}

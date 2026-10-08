@@ -1,8 +1,12 @@
 import asyncio
 import httpx
+import logging
+from time import perf_counter
 from urllib.parse import urlencode
 
 from app.core.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class SupabaseAuth:
@@ -19,11 +23,46 @@ class SupabaseAuth:
                 trust_env=False,
                 limits=httpx.Limits(max_connections=40, max_keepalive_connections=20, keepalive_expiry=30.0),
             )
+            logger.debug("supabase_client_lifecycle created=true")
+        else:
+            logger.debug("supabase_client_lifecycle created=false reused=true")
         return self._client
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        async with asyncio.timeout(self._request_deadline_seconds):
-            return await self._http_client().request(method, f"{self.supabase_url}{path}", **kwargs)
+        start_time = perf_counter()
+        try:
+            async with asyncio.timeout(self._request_deadline_seconds):
+                response = await self._http_client().request(method, f"{self.supabase_url}{path}", **kwargs)
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            logger.debug("supabase_request_complete path=%s elapsed_ms=%.1f status=%s", path, elapsed_ms, response.status_code)
+            return response
+        except asyncio.TimeoutError as e:
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            logger.warning("supabase_request_timeout path=%s elapsed_ms=%.1f exception_class=%s", path, elapsed_ms, type(e).__name__)
+            raise
+        except httpx.ConnectError as e:
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            exc_cause_class = type(e.__cause__).__name__ if e.__cause__ else "none"
+            logger.warning("supabase_request_connect_error path=%s elapsed_ms=%.1f exception_class=%s cause=%s", path, elapsed_ms, type(e).__name__, exc_cause_class)
+            raise
+        except httpx.PoolTimeout as e:
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            logger.warning("supabase_request_pool_timeout path=%s elapsed_ms=%.1f exception_class=%s", path, elapsed_ms, type(e).__name__)
+            raise
+        except httpx.ReadTimeout as e:
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            logger.warning("supabase_request_read_timeout path=%s elapsed_ms=%.1f exception_class=%s", path, elapsed_ms, type(e).__name__)
+            raise
+        except httpx.RequestError as e:
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            exc_cause_class = type(e.__cause__).__name__ if e.__cause__ else "none"
+            logger.warning("supabase_request_error path=%s elapsed_ms=%.1f exception_class=%s cause=%s", path, elapsed_ms, type(e).__name__, exc_cause_class)
+            raise
+        except Exception as e:
+            elapsed_ms = (perf_counter() - start_time) * 1000
+            exc_cause_class = type(e.__cause__).__name__ if e.__cause__ else "none"
+            logger.warning("supabase_request_exception path=%s elapsed_ms=%.1f exception_class=%s cause=%s", path, elapsed_ms, type(e).__name__, exc_cause_class)
+            raise
 
     async def close(self) -> None:
         if self._client is not None and not self._client.is_closed:

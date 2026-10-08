@@ -45,3 +45,26 @@ class IntegrationContextService:
             "engineering": "Atlas",
         }.get(automation_type, "Bolt")
         return self.for_agent(user_id=user_id, agent_name=agent)
+
+    def for_llm_tools(self, user_id: str) -> dict:
+        """Build integration context for LLM tool calling.
+
+        Returns all connected integrations regardless of agent restrictions,
+        as the LLM should be able to use any connected integration via tools.
+        """
+        records = self.db.query(Integration).filter(
+            Integration.user_id == user_id,
+            Integration.status == "connected"
+        ).all()
+
+        return {
+            "integrations": [
+                {
+                    "provider": record.provider,
+                    "account_email": record.provider_email,
+                    "last_sync_at": record.last_sync_at.isoformat() if record.last_sync_at else None,
+                    "metadata": record.metadata_json,
+                }
+                for record in records
+            ],
+        }

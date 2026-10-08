@@ -29,6 +29,7 @@ class GroqProvider(LLMProvider):
         model: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> str:
         data = await self._post(
             model=model or settings.groq_model,
@@ -36,6 +37,7 @@ class GroqProvider(LLMProvider):
             input_text=input_text,
             temperature=temperature if temperature is not None else 0.3,
             max_tokens=max_output_tokens or settings.openai_max_tokens,
+            tools=tools,
         )
         return self._extract_text(data)
 
@@ -46,6 +48,7 @@ class GroqProvider(LLMProvider):
         input_text: str,
         schema: dict[str, Any],
         model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         schema_instruction = (
             f"{instructions}\n\nReturn valid JSON only. The JSON must match this schema intent:\n"
@@ -58,6 +61,7 @@ class GroqProvider(LLMProvider):
             temperature=0.2,
             max_tokens=settings.openai_max_tokens,
             response_format={"type": "json_object"},
+            tools=tools,
         )
         return json.loads(self._extract_text(data))
 
@@ -69,6 +73,7 @@ class GroqProvider(LLMProvider):
         model: str | None = None,
         max_output_tokens: int | None = None,
         trace: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[str]:
         if not settings.groq_api_key:
             raise AIServiceUnavailableError("GROQ_API_KEY is not configured.", retryable=False, provider="groq", category="configuration")
@@ -82,6 +87,8 @@ class GroqProvider(LLMProvider):
             "max_tokens": max_output_tokens or settings.openai_max_tokens,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = tools
         try:
             timeout = httpx.Timeout(
                 connect=settings.llm_connect_timeout_seconds,
@@ -174,6 +181,7 @@ class GroqProvider(LLMProvider):
         temperature: float,
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not settings.groq_api_key:
             raise AIServiceUnavailableError("GROQ_API_KEY is not configured.", retryable=False, provider="groq", category="configuration")
@@ -188,6 +196,8 @@ class GroqProvider(LLMProvider):
         }
         if response_format:
             payload["response_format"] = response_format
+        if tools:
+            payload["tools"] = tools
         try:
             timeout = httpx.Timeout(
                 connect=settings.llm_connect_timeout_seconds,

@@ -130,7 +130,7 @@ async function signOut() {
 }
 
   return (
-    <header className="relative z-30 m-3 mb-0 flex h-14 min-w-0 items-center justify-between gap-4 rounded-lg border border-border bg-card/72 px-5 backdrop-blur-md">
+    <header className="relative z-30 m-3 mb-0 flex h-14 min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-card/72 pl-14 pr-3 backdrop-blur-md md:px-5">
       <div className="flex min-w-0 flex-1 items-center gap-4">
         <span className="hidden shrink-0 text-sm font-medium text-muted-foreground md:inline">{pageTitle}</span>
         <span className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-medium text-primary">Unified AI OS</span>
@@ -211,7 +211,7 @@ async function signOut() {
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-primary/30 to-primary/10 text-sm font-semibold text-primary">
               {displayName.charAt(0)}
             </div>
-            <div className="text-left">
+            <div className="hidden text-left sm:block">
               <p className="text-sm font-medium">{displayName}</p>
               <p className="text-xs text-muted-foreground">{displayRole}</p>
             </div>

@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.dependencies import get_current_user
 from app.core.security.supabase_auth import supabase_auth
 from app.models.user import User
@@ -84,29 +85,50 @@ def bearer_token(authorization: str | None) -> str:
     return authorization.split(" ", 1)[1]
 
 
+def finalize_signup(db: Session, *, email: str, user_id: str | None, referral_code: str | None, verified: bool) -> UserRead:
+    user = UserRepository(db).get_or_create(email=email, user_id=user_id)
+    db.commit()
+    db.refresh(user)
+    if referral_code:
+        from app.services.credit_service import CreditService
+        CreditService(db).apply_referral(user, referral_code, verified=verified)
+    AuditService(db).record(user_id=user.id, action="login", resource_type="auth", resource_id=user.id, metadata={"event": "signup"})
+    return UserRead.model_validate(user)
+
+
+def finalize_login(db: Session, *, email: str, user_id: str | None) -> UserRead:
+    user = UserRepository(db).get_or_create(email=email, user_id=user_id)
+    db.commit()
+    db.refresh(user)
+    AuditService(db).record(user_id=user.id, action="login", resource_type="auth", resource_id=user.id)
+    return UserRead.model_validate(user)
+
+
+def finalize_refresh_session(db: Session, *, email: str, user_id: str | None) -> UserRead:
+    user = UserRepository(db).get_or_create(email=email, user_id=user_id)
+    db.commit()
+    db.refresh(user)
+    return UserRead.model_validate(user)
+
+
 @router.post("/signup", response_model=AuthSession)
 async def signup(payload: AuthCredentials, db: Annotated[Session, Depends(get_db)]) -> AuthSession:
     normalized_email = str(payload.email).strip().lower()
-    if UserRepository(db).get_by_email(normalized_email):
+    existing = await run_serial_db(UserRepository(db).get_by_email, normalized_email)
+    if existing:
         raise HTTPException(status_code=409, detail="Account already exists. Please sign in instead.")
     try:
         supabase_response = await supabase_auth.signup(normalized_email, payload.password)
     except Exception as exc:
         raise auth_error(exc) from exc
 
-    supabase_user = supabase_response.get("user") or {}
-    user = UserRepository(db).get_or_create(email=normalized_email, user_id=supabase_user.get("id"))
-    db.commit()
-    db.refresh(user)
     session = supabase_response.get("session") or {}
-    if payload.referral_code:
-        from app.services.credit_service import CreditService
-        try:
-            CreditService(db).apply_referral(user, payload.referral_code, verified=bool(session.get("access_token")))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    AuditService(db).record(user_id=user.id, action="login", resource_type="auth", resource_id=user.id, metadata={"event": "signup"})
-    return AuthSession(access_token=session.get("access_token"), refresh_token=session.get("refresh_token"), user=UserRead.model_validate(user))
+    supabase_user = supabase_response.get("user") or {}
+    try:
+        user_read = await run_serial_db(finalize_signup, db, email=normalized_email, user_id=supabase_user.get("id"), referral_code=payload.referral_code, verified=bool(session.get("access_token")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AuthSession(access_token=session.get("access_token"), refresh_token=session.get("refresh_token"), user=user_read)
 
 
 @router.post("/login", response_model=AuthSession)
@@ -118,14 +140,11 @@ async def login(payload: AuthCredentials, request: Request, db: Annotated[Sessio
         raise auth_error(exc) from exc
 
     supabase_user = supabase_response.get("user") or {}
-    user = UserRepository(db).get_or_create(email=payload.email, user_id=supabase_user.get("id"))
-    db.commit()
-    db.refresh(user)
-    AuditService(db).record(user_id=user.id, action="login", resource_type="auth", resource_id=user.id)
+    user_read = await run_serial_db(finalize_login, db, email=payload.email, user_id=supabase_user.get("id"))
     return AuthSession(
         access_token=supabase_response.get("access_token"),
         refresh_token=supabase_response.get("refresh_token"),
-        user=UserRead.model_validate(user),
+        user=user_read,
     )
 
 
@@ -162,13 +181,11 @@ async def refresh_session(payload: RefreshSessionRequest, request: Request, db: 
     if not email:
         raise HTTPException(status_code=401, detail="Invalid session")
 
-    user = UserRepository(db).get_or_create(email=email, user_id=supabase_user.get("id"))
-    db.commit()
-    db.refresh(user)
+    user_read = await run_serial_db(finalize_refresh_session, db, email=email, user_id=supabase_user.get("id"))
     return AuthSession(
         access_token=supabase_response.get("access_token"),
         refresh_token=supabase_response.get("refresh_token") or payload.refresh_token,
-        user=UserRead.model_validate(user),
+        user=user_read,
     )
 
 
@@ -280,7 +297,7 @@ async def enroll_mfa(
         result = await supabase_auth.enroll_totp(bearer_token(authorization), payload.friendly_name)
     except Exception as exc:
         raise auth_error(exc) from exc
-    AuditService(db).record(user_id=user.id, action="mfa_enroll_started", resource_type="auth", resource_id=user.id)
+    await run_serial_db(AuditService(db).record, user_id=user.id, action="mfa_enroll_started", resource_type="auth", resource_id=user.id)
     return result
 
 
@@ -318,7 +335,7 @@ async def verify_mfa(
         result = await supabase_auth.verify_factor(bearer_token(authorization), payload.factor_id, payload.challenge_id, payload.code)
     except Exception as exc:
         raise auth_error(exc) from exc
-    AuditService(db).record(user_id=user.id, action="mfa_verified", resource_type="auth", resource_id=user.id)
+    await run_serial_db(AuditService(db).record, user_id=user.id, action="mfa_verified", resource_type="auth", resource_id=user.id)
     return result
 
 
@@ -333,7 +350,7 @@ async def unenroll_mfa(
         result = await supabase_auth.unenroll_factor(bearer_token(authorization), payload.factor_id)
     except Exception as exc:
         raise auth_error(exc) from exc
-    AuditService(db).record(user_id=user.id, action="mfa_unenrolled", resource_type="auth", resource_id=user.id)
+    await run_serial_db(AuditService(db).record, user_id=user.id, action="mfa_unenrolled", resource_type="auth", resource_id=user.id)
     return result
 
 

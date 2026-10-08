@@ -77,13 +77,22 @@ class GmailProvider(BaseIntegrationProvider):
             return {"error": str(exc)}
 
     @staticmethod
-    def _raw_message(to: str, subject: str, body: str, *, in_reply_to: str | None = None) -> str:
+    def _raw_message(to: str, subject: str, body: str, *, in_reply_to: str | None = None, attachment_bytes: bytes | None = None, attachment_filename: str | None = None) -> str:
         message = EmailMessage()
         message["To"], message["Subject"] = to, subject
         if in_reply_to:
             message["In-Reply-To"] = in_reply_to
             message["References"] = in_reply_to
         message.set_content(body)
+        if attachment_bytes and attachment_filename:
+            maintype, subtype = "application", "octet-stream"
+            if attachment_filename.endswith(".pdf"):
+                maintype, subtype = "application", "pdf"
+            elif attachment_filename.endswith((".docx", ".doc")):
+                maintype, subtype = "application", "vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif attachment_filename.endswith((".pptx", ".ppt")):
+                maintype, subtype = "application", "vnd.openxmlformats-officedocument.presentationml.presentation"
+            message.add_attachment(attachment_bytes, maintype=maintype, subtype=subtype, filename=attachment_filename)
         return base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 
     def create_draft(self, integration: Integration, *, to: str, subject: str, body: str, thread_id: str | None = None, in_reply_to: str | None = None) -> dict:
@@ -92,8 +101,8 @@ class GmailProvider(BaseIntegrationProvider):
             payload["message"]["threadId"] = thread_id
         return self.google_request(integration, "POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts", payload=payload)
 
-    def update_draft(self, integration: Integration, draft_id: str, *, to: str, subject: str, body: str) -> dict:
-        return self.google_request(integration, "PUT", f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}", payload={"message": {"raw": self._raw_message(to, subject, body)}})
+    def update_draft(self, integration: Integration, draft_id: str, *, to: str, subject: str, body: str, attachment_bytes: bytes | None = None, attachment_filename: str | None = None) -> dict:
+        return self.google_request(integration, "PUT", f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}", payload={"message": {"raw": self._raw_message(to, subject, body, attachment_bytes=attachment_bytes, attachment_filename=attachment_filename)}})
 
     def send_draft(self, integration: Integration, draft_id: str) -> dict:
         return self.google_request(integration, "POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send", payload={"id": draft_id})

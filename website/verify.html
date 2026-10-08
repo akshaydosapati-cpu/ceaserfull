@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verify a CEASER Certificate</title>
+  <meta name="description" content="Verify the authenticity of certificates issued by CEASER.">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://www.heyceaser.in/verify/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Verify a CEASER Certificate">
+  <meta property="og:description" content="Verify the authenticity of certificates issued by CEASER.">
+  <meta property="og:url" content="https://www.heyceaser.in/verify/">
+  <meta property="og:image" content="https://www.heyceaser.in/ceaser-logo-full.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Verify a CEASER Certificate">
+  <meta name="twitter:description" content="Verify the authenticity of certificates issued by CEASER.">
+  <meta name="twitter:image" content="https://www.heyceaser.in/ceaser-logo-full.png">
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/verify.css">
+</head>
+<body>
+  <header class="verify-header">
+    <a class="verify-brand" href="/" aria-label="CEASER home">
+      <img src="/favicon.png" alt="" width="34" height="34">
+      <span>CEASER</span>
+    </a>
+    <span class="official-label">Official verification</span>
+  </header>
+
+  <main class="verify-main">
+    <section class="verify-intro" aria-labelledby="verify-title">
+      <p class="eyebrow">CEASER Trust</p>
+      <h1 id="verify-title">Certificate Verification</h1>
+      <p>Verify the authenticity of a CEASER-issued certificate.</p>
+    </section>
+
+    <section class="verification-card" aria-label="Certificate verification">
+      <form id="verification-form" novalidate>
+        <div class="field-group">
+          <label for="certificate-id">Certificate ID</label>
+          <input
+            id="certificate-id"
+            name="certificateId"
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            autocapitalize="characters"
+            spellcheck="false"
+            maxlength="64"
+            placeholder="CEASER-INT-2026-001"
+            aria-describedby="certificate-help certificate-error"
+          >
+          <p id="certificate-help" class="helper">Enter the Certificate ID exactly as shown on the certificate.</p>
+          <p id="certificate-error" class="field-error" hidden></p>
+        </div>
+        <button id="verify-button" type="submit">
+          <span class="button-label">Verify Certificate</span>
+          <span class="button-loader" aria-hidden="true"></span>
+        </button>
+      </form>
+
+      <div id="verification-status" class="status-panel" role="status" aria-live="polite" hidden></div>
+    </section>
+
+    <p class="trust-note"><span aria-hidden="true">&#9670;</span> Records are verified directly against CEASER's official certificate registry.</p>
+  </main>
+
+  <footer class="verify-footer">
+    <span>&copy; 2026 CEASER</span>
+    <nav aria-label="Legal">
+      <a href="/security.html">Security &amp; Trust</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+    </nav>
+  </footer>
+
+  <script src="/config.js"></script>
+  <script src="/verify.js"></script>
+</body>
+</html>

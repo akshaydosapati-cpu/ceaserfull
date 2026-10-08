@@ -30,13 +30,15 @@ class ConversationRepository:
         self.db.flush()
         return conversation
 
-    def update(self, conversation: Conversation, title: str | None = None, pinned: bool | None = None, archived: bool | None = None) -> Conversation:
+    def update(self, conversation: Conversation, title: str | None = None, pinned: bool | None = None, archived: bool | None = None, project_id: str | None = None, update_project: bool = False) -> Conversation:
         if title is not None:
             conversation.title = title
         if pinned is not None:
             conversation.pinned = pinned
         if archived is not None:
             conversation.archived = archived
+        if update_project:
+            conversation.project_id = project_id
         self.db.flush()
         return conversation
 

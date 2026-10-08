@@ -14,10 +14,11 @@
   },
   "build": {
     "appId": "ai.ceaser.desktop",
-    "productName": "CEASER",
+    "productName": "NIX V1 by CeaserAIOS",
     "directories": {
       "output": "release"
     },
+    "artifactName": "NIX-V1-by-CeaserAIOS-${version}-${arch}.${ext}",
     "files": [
       "src/**/*",
       "package.json"
@@ -58,7 +59,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "CEASER"
+      "shortcutName": "NIX V1 by CeaserAIOS"
     }
   },
   "devDependencies": {

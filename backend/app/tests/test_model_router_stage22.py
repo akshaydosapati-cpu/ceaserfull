@@ -92,6 +92,21 @@ class FakeProvider:
         return self.outcome
 
 
+@pytest.mark.parametrize("empty", ["", "   ", None])
+def test_empty_generation_falls_back_without_marking_primary_success(monkeypatch, empty):
+    monkeypatch.setattr(settings, "llm_max_fallbacks", 1)
+    router = ModelRouter(
+        ModelRegistry([model("m1", "p1", {"general"}, quality=10), model("m2", "p2", {"general"}, quality=8)]),
+        {"p1": lambda: FakeProvider(empty), "p2": lambda: FakeProvider("usable answer")},
+    )
+    response = asyncio.run(router.generate(request(), instructions="safe", input_text="hello"))
+    assert response.content == "usable answer"
+    assert response.provider_id == "p2"
+    assert response.fallback_used is True
+    assert response.attempt_count == 2
+    assert router.snapshot()["m1"]["failures"] == 1
+
+
 def test_timeout_falls_back_and_emits_events(monkeypatch):
     monkeypatch.setattr(settings, "llm_max_fallbacks", 2)
     timeout = AIServiceUnavailableError("timed out", provider="p1", category="timeout", retryable=True)

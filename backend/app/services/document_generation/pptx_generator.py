@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from io import BytesIO
 
-from pptx import Presentation
-from pptx.util import Pt
+try:
+    from pptx import Presentation
+    from pptx.util import Pt
+except ImportError:
+    Presentation = None
+    Pt = None
 
 
 class PPTXGenerator:
     content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
     def generate(self, title: str, sections: list[tuple[str, str]]) -> bytes:
+        if Presentation is None or Pt is None:
+            raise RuntimeError("python-pptx is required for PPTX generation")
         presentation = Presentation()
         title_slide = presentation.slides.add_slide(presentation.slide_layouts[0])
         title_slide.shapes.title.text = title

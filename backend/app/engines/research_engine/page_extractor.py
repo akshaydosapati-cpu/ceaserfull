@@ -8,6 +8,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.engines.research_engine.http_client import research_http_client
+
 
 @dataclass
 class ExtractedPage:
@@ -30,18 +32,12 @@ class PageExtractor:
             return None
 
         try:
-            with httpx.Client(
-                follow_redirects=True,
-                timeout=self.timeout_seconds,
-                trust_env=False,
-                headers={"User-Agent": "CEASER Research/1.0"},
-            ) as client:
-                response = client.get(url)
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "").lower()
-                if "text/html" not in content_type and "text/plain" not in content_type:
-                    return None
-                raw = response.content[: self.max_bytes]
+            response = research_http_client().get(url, timeout=httpx.Timeout(self.timeout_seconds, connect=2.0))
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                return None
+            raw = response.content[: self.max_bytes]
         except Exception:
             return None
 

@@ -13,7 +13,7 @@ class IntentEngine:
         request.metadata["intent_subdomain"] = subdomain
         if self._looks_like_desktop_action(text):
             return IntentType.DESKTOP_ACTION
-        if any(term in text for term in ["what did we decide", "what did we decide about", "previous conversation", "previous chat", "last time we discussed", "what is my name", "who am i", "remember", "memory"]):
+        if any(term in text for term in ["what did we decide", "what did we decide about", "previous conversation", "previous chat", "last time we discussed", "what were we discussing", "what is my name", "who am i", "remember", "memory", "where do i keep", "where is my"]):
             return IntentType.MEMORY_QUESTION
         if any(term in text for term in ["calendar", "event", "meeting", "schedule today", "tomorrow"]):
             return IntentType.CALENDAR_LOOKUP

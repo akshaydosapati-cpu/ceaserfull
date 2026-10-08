@@ -10,6 +10,7 @@ class ConversationCreate(BaseModel):
 
 class ConversationRead(TimestampedModel):
     user_id: str
+    project_id: str | None = None
     title: str
     pinned: bool = False
     archived: bool = False
@@ -22,6 +23,7 @@ class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     pinned: bool | None = None
     archived: bool | None = None
+    project_id: str | None = None
 
 
 class MessageCreate(BaseModel):

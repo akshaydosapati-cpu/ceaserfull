@@ -2,21 +2,25 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { ChangeEvent, ReactNode } from "react"
+import Image from "next/image"
+import ceaserFavicon from "@/public/favicon.png"
+import { ThinkingOrb, type OrbState } from "thinking-orbs"
 import { chatApi, type AgentContribution, type CeaserChatResponse, type ChatMessage, type ConversationRecord, type MessageMetadata, type RankedMemory, type ResearchResult, type WorkflowResult } from "@/lib/api/chat"
 import { documentsApi, type DocumentKind, type GeneratedDocument } from "@/lib/api/documents"
 import { filesApi, type FileRecord } from "@/lib/api/files"
+import { projectsApi, type ProjectRecord } from "@/lib/api/projects"
 import { useApp } from "@/lib/app-context"
 import { recordStartupMetric } from "@/lib/api/client"
 import { trackEvent } from "@/lib/analytics"
 import { getUserDisplayName, readUserProfile } from "@/lib/user-profile"
 import { cn } from "@/lib/utils"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { CeaserLogo } from "../ceaser-logo"
 import { RichResponseRenderer } from "../rich-response-renderer"
+import { WorkflowCard } from "../workflow-card"
 import { FOOTER_VOICE_EVENT } from "../command-bar"
 import { navigationItems } from "@/lib/ceaser"
 import type { VoiceRespondResponse } from "@/lib/api/voice"
-import { Archive, BarChart3, Bookmark, CalendarPlus, Check, CheckCircle2, ChevronLeft, Code2, Copy, Download, Edit3, ExternalLink, FileText, Lightbulb, Loader2, Mail, MessageSquare, MoreHorizontal, Paperclip, PenLine, Pin, PinOff, Plus, Presentation, RefreshCw, RotateCcw, Search, Send, Share2, Sparkles, Square, Star, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react"
+import { Archive, ArrowLeft, BarChart3, Bookmark, CalendarPlus, Check, CheckCircle2, ChevronLeft, Code2, Copy, Download, Edit3, ExternalLink, FileInput, FileText, FolderKanban, Lightbulb, Loader2, Mail, MessageSquare, MoreHorizontal, Paperclip, PenLine, Pin, PinOff, Plus, Presentation, RefreshCw, RotateCcw, Search, Send, Share2, Sparkles, Square, Star, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
 interface Message {
@@ -37,6 +41,7 @@ interface Message {
   richResponse?: CeaserChatResponse["rich_response"]
   isTyping?: boolean
   isStreaming?: boolean
+  loadingMode?: "thinking" | "solving" | "searching" | "working"
   statusLabel?: string
 }
 
@@ -104,18 +109,18 @@ const studentWorkflowShortcuts: LaunchTask[] = [
   { title: "Lecture Notes to Revision Kit", subtitle: "Transform attached notes", icon: FileText, color: "text-cyan-300 bg-cyan-500/12", instruction: "Turn the attached lecture notes into study notes, key questions, and a study plan for", output: "revision kit document", requiresFile: true },
 ]
 
-const hfTextModelOptions = [
-  { id: "auto", label: "Auto" },
-  { id: "nvidia-nemotron-3-ultra-550b-a55b", label: "Nemotron 3 Ultra 550B" },
-  { id: "openai-primary", label: "OpenAI" },
-  { id: "groq-primary", label: "Groq" },
-  { id: "gemini-primary", label: "Gemini" },
-]
-
 const isImageGenerationRequest = (message: string) => {
   const normalized = message.toLowerCase().replace(/\s+/g, " ").trim()
   return /\b(create|generate|make|design|draw|illustrate)\b/.test(normalized)
     && /\b(image|picture|photo|illustration|artwork|poster|wallpaper|logo|thumbnail)\b/.test(normalized)
+}
+
+const loadingModeForPrompt = (message: string): NonNullable<Message["loadingMode"]> => {
+  const normalized = message.toLowerCase()
+  if (/\b(code|coding|html|css|javascript|typescript|python|react|api|debug|function|website|app)\b/.test(normalized)) return "solving"
+  if (/\b(plugin|integration|gmail|calendar|notion|github|drive|tasks|classroom)\b/.test(normalized)) return "searching"
+  if (/\b(create|generate|make|build|write|draft|design|presentation|document|report|image|spreadsheet)\b/.test(normalized)) return "working"
+  return "thinking"
 }
 
 const agentNameToId = (name: string) => name.toLowerCase()
@@ -383,6 +388,7 @@ export function ChatPage() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
+  const [autocompleteSuggestions, setAutocompleteSuggestions] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState("")
   const [conversationFilter, setConversationFilter] = useState<ConversationFilter>("all")
   const [isLoading, setIsLoading] = useState(false)
@@ -390,12 +396,14 @@ export function ChatPage() {
   const [attachedFiles, setAttachedFiles] = useState<FileRecord[]>([])
   const [isBooting, setIsBooting] = useState(true)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
+  const [moveConversationId, setMoveConversationId] = useState<string | null>(null)
+  const [projects, setProjects] = useState<ProjectRecord[]>([])
+  const [projectsLoading, setProjectsLoading] = useState(false)
   const [seededProjectFileIds, setSeededProjectFileIds] = useState<string[]>([])
   const [showArchivedChats, setShowArchivedChats] = useState(false)
   const [showSavedResponses, setShowSavedResponses] = useState(false)
   const [savedResponses, setSavedResponses] = useState<SavedResponse[]>([])
   const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false)
-  const [modelPreference, setModelPreference] = useState("auto")
   const [activeLaunchTask, setActiveLaunchTask] = useState<LaunchTask | null>(null)
   const [launchTaskTopic, setLaunchTaskTopic] = useState("")
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -403,7 +411,7 @@ export function ChatPage() {
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowStreamRef = useRef(true)
   const chatFileInputRef = useRef<HTMLInputElement>(null)
-  const chatComposerRef = useRef<HTMLInputElement>(null)
+  const chatComposerRef = useRef<HTMLTextAreaElement>(null)
   const preferredConversationRef = useRef<string | null>(null)
   const conversationCacheRef = useRef(new Map<string, Message[]>())
   const conversationRequestCacheRef = useRef(new Map<string, Promise<Message[]>>())
@@ -412,6 +420,21 @@ export function ChatPage() {
   const loadRequestRef = useRef(0)
   const streamAbortRef = useRef<AbortController | null>(null)
   const streamSessionRef = useRef(0)
+  const renderTimingRef = useRef<{ id: string; requestId: string; started: number; first: boolean; final: boolean } | null>(null)
+  useEffect(() => {
+    const timing = renderTimingRef.current
+    if (!timing) return
+    const message = messages.find((item) => item.id === timing.id)
+    if (!message?.content) return
+    if (!timing.first) {
+      timing.first = true
+      console.info("[CEASER LATENCY]", { request_id: timing.requestId, stage: "first_content_committed", elapsed_ms: Math.round(performance.now() - timing.started) })
+    }
+    if (!message.isStreaming && !message.isTyping && !timing.final) {
+      timing.final = true
+      console.info("[CEASER LATENCY]", { request_id: timing.requestId, stage: "final_content_committed", elapsed_ms: Math.round(performance.now() - timing.started) })
+    }
+  }, [messages])
   const autoSendSeedRef = useRef(false)
   const processedChatRequestRef = useRef<string | null>(null)
   const isProgrammaticScrollRef = useRef(false)
@@ -465,6 +488,36 @@ export function ChatPage() {
     [messages],
   )
 
+  const updateComposer = useCallback((value: string) => {
+    setInput(value)
+    window.requestAnimationFrame(() => {
+      const composer = chatComposerRef.current
+      if (!composer) return
+      composer.style.height = "auto"
+      composer.style.height = `${Math.min(composer.scrollHeight, 120)}px`
+    })
+  }, [])
+
+  useEffect(() => {
+    const query = input.trim()
+    if (query.length < 2 || isLoading || guestDemo) {
+      setAutocompleteSuggestions([])
+      return
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      void chatApi.autocomplete(query, controller.signal)
+        .then((response) => setAutocompleteSuggestions(response.suggestions.filter((item) => item.toLowerCase() !== query.toLowerCase()).slice(0, 5)))
+        .catch((error) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) setAutocompleteSuggestions([])
+        })
+    }, 250)
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [guestDemo, input, isLoading])
+
   const filteredConversations = useMemo(() => {
     const query = searchQuery.toLowerCase().trim()
     const now = new Date()
@@ -486,11 +539,6 @@ export function ChatPage() {
     () => conversations.find((item) => item.id === activeConversationId) ?? null,
     [activeConversationId, conversations],
   )
-
-  const selectedModelLabel = useMemo(() => {
-    const option = hfTextModelOptions.find((item) => item.id === modelPreference)
-    return option?.label ?? "Auto"
-  }, [modelPreference])
 
   const filteredSavedResponses = useMemo(() => {
     const query = searchQuery.toLowerCase().trim()
@@ -585,6 +633,7 @@ export function ChatPage() {
     try {
       const records = await chatApi.listConversations(showArchivedChats)
       setConversations(records)
+      window.dispatchEvent(new CustomEvent("ceaser:conversations-changed", { detail: { action: "synced", conversations: records } }))
       setLoadError(null)
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Conversation list is still loading.")
@@ -789,11 +838,12 @@ export function ChatPage() {
       tone: "danger",
     })
     if (!confirmed) return
-    await chatApi.deleteConversation(conversation.id)
-    const remaining = conversations.filter((item) => item.id !== conversation.id)
+    const previous = conversations
+    const remaining = previous.filter((item) => item.id !== conversation.id)
     setConversations(remaining)
     setOpenConversationMenuId(null)
     conversationCacheRef.current.delete(conversation.id)
+    window.dispatchEvent(new CustomEvent("ceaser:conversations-changed", { detail: { action: "deleted", conversationId: conversation.id } }))
     if (activeConversationId === conversation.id) {
       cancelActiveStream()
       const next = remaining[0]
@@ -805,6 +855,14 @@ export function ChatPage() {
         window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY)
         setMessages([])
       }
+    }
+    try {
+      await chatApi.deleteConversation(conversation.id)
+      setLoadError(null)
+    } catch (error) {
+      setConversations(previous)
+      window.dispatchEvent(new CustomEvent("ceaser:conversations-changed", { detail: { action: "reload" } }))
+      setLoadError(error instanceof Error ? error.message : "Could not delete this chat.")
     }
   }
 
@@ -825,11 +883,39 @@ export function ChatPage() {
     }
   }
 
+  const handleOpenMoveToProject = async (conversation: ConversationRecord) => {
+    setMoveConversationId(conversation.id)
+    if (projects.length || projectsLoading) return
+    setProjectsLoading(true)
+    try {
+      setProjects(await projectsApi.list())
+      setLoadError(null)
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Could not load your projects.")
+    } finally {
+      setProjectsLoading(false)
+    }
+  }
+
+  const handleMoveConversation = async (conversation: ConversationRecord, projectId: string | null) => {
+    try {
+      const updated = await chatApi.updateConversation(conversation.id, { project_id: projectId })
+      setConversations((current) => current.map((item) => item.id === updated.id ? updated : item))
+      setLoadError(null)
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Could not move this chat to the project.")
+    } finally {
+      setMoveConversationId(null)
+      setOpenConversationMenuId(null)
+    }
+  }
+
   const ensureConversation = async () => {
     if (activeConversationId && !showArchivedChats) return activeConversationId
     if (showArchivedChats) setShowArchivedChats(false)
     const conversation = await chatApi.createConversation()
     setConversations((current) => [conversation, ...current])
+    window.dispatchEvent(new CustomEvent("ceaser:conversations-changed", { detail: { action: "created", conversation } }))
     setActiveConversationId(conversation.id)
     window.localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversation.id)
     return conversation.id
@@ -841,6 +927,8 @@ export function ChatPage() {
     trackEvent("chat_message_sent")
     cancelActiveStream()
     const documentRequest = detectDocumentRequest(content)
+    const streamSessionId = ++streamSessionRef.current
+    const requestId = crypto.randomUUID()
     // A newly sent message should be visible, but once the user scrolls up we
     // keep their reading position stable while streamed chunks arrive.
     shouldFollowStreamRef.current = true
@@ -860,6 +948,7 @@ export function ChatPage() {
       timestamp: formatTime(),
       isTyping: true,
       isStreaming: true,
+      loadingMode: loadingModeForPrompt(content),
     }
     setMessages((current) => [...current, userMessage, typingMessage])
     const sendClickedAt = performance.now()
@@ -891,18 +980,16 @@ export function ChatPage() {
       const fileIds = Array.from(new Set([...attachedFiles.map((file) => file.id), ...seededProjectFileIds]))
       const controller = new AbortController()
       streamAbortRef.current = controller
-      const streamSessionId = ++streamSessionRef.current
       const clientStreamStartedAt = performance.now()
+      renderTimingRef.current = { id: typingMessage.id, requestId, started: clientStreamStartedAt, first: false, final: false }
       let firstTokenAt: number | null = null
       let response: CeaserChatResponse | null = null
       let streamedContent = ""
-      let receivedStreamContent = false
       const imageGenerationRequested = isImageGenerationRequest(content)
       try {
         let streamError: string | null = null
         if (imageGenerationRequested) {
           response = await chatApi.sendCeaserMessage(content, conversationId ?? undefined, fileIds, {
-            modelPreference: modelPreference === "auto" ? undefined : modelPreference,
             responseMode: "image",
             forceLiveWebSearch: false,
           })
@@ -916,7 +1003,6 @@ export function ChatPage() {
                 console.info("[CEASER LATENCY] first_content_token")
               }
               streamedContent += text
-              receivedStreamContent = true
               setMessages((current) =>
                 current.map((message) =>
                   message.id === typingMessage.id
@@ -927,6 +1013,7 @@ export function ChatPage() {
             },
             onComplete: (streamedResponse) => {
               if (streamSessionRef.current !== streamSessionId) return
+              streamError = null
               console.info(
                 `[CEASER LLM] provider=${String(streamedResponse.context_summary?.provider ?? "not reported")} model=${String(streamedResponse.context_summary?.model ?? "not reported")} fallback_used=${String(streamedResponse.context_summary?.fallback_used ?? false)} agents=${streamedResponse.selected_agents.join(",") || "none"}`,
               )
@@ -941,45 +1028,19 @@ export function ChatPage() {
               if (streamSessionRef.current !== streamSessionId) return
               streamError = message
             },
-          }, { signal: controller.signal, modelPreference: modelPreference === "auto" ? undefined : modelPreference, forceLiveWebSearch: false })
+          }, { signal: controller.signal, requestId, forceLiveWebSearch: false })
+          if (streamSessionRef.current !== streamSessionId || controller.signal.aborted) return
           if (streamError) throw new Error(streamError)
         }
       } catch (error) {
+        if (streamSessionRef.current !== streamSessionId) return
         if (error instanceof DOMException && error.name === "AbortError") return
-        if (imageGenerationRequested) throw error
-        if (receivedStreamContent) {
-          response = {
-            scope: "personal_ai_os",
-            conversation_id: conversationId,
-            selected_agents: [],
-            contributions: [],
-            contribution_summary: "Response streamed.",
-            memories_used: [],
-            research: null,
-            workflow: null,
-            context_summary: {},
-            suggestions: [],
-            response: streamedContent,
-          }
-        } else {
-          throw error
-        }
+        if (!response) throw error
       }
 
+      if (streamSessionRef.current !== streamSessionId) return
       if (!response) {
-        response = {
-          scope: "personal_ai_os",
-          conversation_id: conversationId,
-          selected_agents: [],
-          contributions: [],
-          contribution_summary: "Response streamed.",
-          memories_used: [],
-          research: null,
-          workflow: null,
-          context_summary: {},
-          suggestions: [],
-          response: streamedContent || "CEASER could not complete that response. Please try again.",
-        }
+        throw new Error("The response was interrupted before completion. Please try again.")
       }
 
       const assistantMessage: Message = { ...responseToMessage(typingMessage.id, response), documentRequest: documentRequest ?? undefined }
@@ -1013,60 +1074,33 @@ export function ChatPage() {
           setMessages((current) => current.map((message) => message.id === typingMessage.id ? { ...message, artifact: { id: `failed-${typingMessage.id}`, fileId: "", title: documentRequest.label, format: documentRequest.kind, status: "failed", filename: "", preview: "", metadata: {} } } : message))
         })
       }
-      if (conversationId) {
-        const convoId = conversationId
-        void (async () => {
-          for (let attempt = 0; attempt < 10; attempt += 1) {
-            try {
-              const persistedMessages = await chatApi.listMessages(convoId, 12)
-              const persistedAssistant = [...persistedMessages].reverse().find((message) => message.role === "assistant")
-              if (!persistedAssistant) {
-                await new Promise((resolve) => window.setTimeout(resolve, 250))
-                continue
-              }
-              const hydratedAssistant = {
-                ...normalizeMessage(persistedAssistant),
-                id: typingMessage.id,
-                documentRequest: documentRequest ?? undefined,
-              }
-              setMessages((current) => {
-                const next = current.map((message) =>
-                  message.id === typingMessage.id
-                    ? { ...hydratedAssistant, isTyping: false, isStreaming: false }
-                    : message,
-                )
-                conversationCacheRef.current.set(convoId, next)
-                return next
-              })
-              break
-            } catch {
-              await new Promise((resolve) => window.setTimeout(resolve, 250))
-            }
-          }
-        })()
-      }
+      // The complete SSE payload is emitted after persistence and is authoritative.
       requestAnimationFrame(() => {
-        console.info("[CEASER LATENCY] frontend_render_ms", Math.round(performance.now() - clientStreamStartedAt), "first_token_ms", firstTokenAt === null ? null : Math.round(firstTokenAt - clientStreamStartedAt))
+        console.info("[CEASER LATENCY] stream_lifecycle_ms", Math.round(performance.now() - clientStreamStartedAt), "first_token_ms", firstTokenAt === null ? null : Math.round(firstTokenAt - clientStreamStartedAt))
       })
       setAttachedFiles([])
       void refreshConversationList()
       window.dispatchEvent(new Event("ceaser:activity-updated"))
     } catch (error) {
+      if (streamSessionRef.current !== streamSessionId) return
       if (error instanceof DOMException && error.name === "AbortError") return
       const assistantMessage: Message = {
         id: typingMessage.id,
         role: "assistant",
         content: error instanceof Error ? error.message : "CEASER chat failed to connect.",
         timestamp: formatTime(),
+        statusLabel: "Interrupted",
       }
       setMessages((current) => {
-        const next = current.map((message) => (message.id === typingMessage.id ? assistantMessage : message))
+        const next = current.map((message) => (message.id === typingMessage.id ? { ...assistantMessage, content: message.content || assistantMessage.content } : message))
         if (conversationId) conversationCacheRef.current.set(conversationId, next)
         return next
       })
     } finally {
-      streamAbortRef.current = null
-      setIsLoading(false)
+      if (streamSessionRef.current === streamSessionId) {
+        streamAbortRef.current = null
+        setIsLoading(false)
+      }
     }
   }
 
@@ -1174,6 +1208,30 @@ export function ChatPage() {
     return () => window.removeEventListener(FOOTER_VOICE_EVENT, handleFooterVoiceResponse)
   })
 
+  useEffect(() => {
+    const syncConversationChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ action?: string; conversationId?: string; conversation?: ConversationRecord }>).detail || {}
+      if (detail.action === "deleted" && detail.conversationId) {
+        setConversations((current) => current.filter((item) => item.id !== detail.conversationId))
+        conversationCacheRef.current.delete(detail.conversationId)
+        if (activeConversationId === detail.conversationId) {
+          cancelActiveStream()
+          setActiveConversationId(null)
+          window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY)
+          setMessages([])
+        }
+        return
+      }
+      if (detail.action === "updated" && detail.conversation) {
+        setConversations((current) => current.map((item) => item.id === detail.conversation?.id ? detail.conversation : item).filter((item) => !item.archived) as ConversationRecord[])
+        return
+      }
+      if (detail.action === "reload") void loadConversations()
+    }
+    window.addEventListener("ceaser:conversations-changed", syncConversationChange)
+    return () => window.removeEventListener("ceaser:conversations-changed", syncConversationChange)
+  }, [activeConversationId, cancelActiveStream, loadConversations])
+
   const handleChatFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -1213,6 +1271,43 @@ export function ChatPage() {
   })
 
   const ActiveLaunchIcon = activeLaunchTask?.icon ?? Sparkles
+
+  const renderConversationMenu = (conversation: ConversationRecord, className: string) => (
+    <div className={cn("absolute z-40 w-56 rounded-xl border border-border bg-popover p-2 shadow-2xl", className)}>
+      {moveConversationId === conversation.id ? (
+        <>
+          <button onClick={() => setMoveConversationId(null)} className="mb-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-muted-foreground hover:bg-secondary hover:text-foreground">
+            <ArrowLeft className="h-3.5 w-3.5" /> Move to project
+          </button>
+          <div className="max-h-56 overflow-y-auto">
+            {projectsLoading ? <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading projects...</div> : (
+              <>
+                <ConversationMenuItem icon={X} label="No project" onClick={() => void handleMoveConversation(conversation, null)} />
+                {projects.map((project) => (
+                  <ConversationMenuItem
+                    key={project.id}
+                    icon={FolderKanban}
+                    label={`${project.name}${conversation.project_id === project.id ? " (current)" : ""}`}
+                    onClick={() => void handleMoveConversation(conversation, project.id)}
+                  />
+                ))}
+                {!projects.length && <p className="px-3 py-3 text-xs text-muted-foreground">No projects yet.</p>}
+              </>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <ConversationMenuItem icon={Edit3} label="Rename" onClick={() => void handleRenameConversation(conversation)} />
+          <ConversationMenuItem icon={conversation.pinned ? PinOff : Pin} label={conversation.pinned ? "Unpin" : "Pin"} onClick={() => void handleTogglePinConversation(conversation)} />
+          <ConversationMenuItem icon={FileInput} label="Move to project" onClick={() => void handleOpenMoveToProject(conversation)} />
+          <ConversationMenuItem icon={Share2} label="Share" onClick={() => void handleShareConversation(conversation)} />
+          <ConversationMenuItem icon={conversation.archived ? RotateCcw : Archive} label={conversation.archived ? "Unarchive" : "Archive"} onClick={() => void (conversation.archived ? handleUnarchiveConversation(conversation) : handleArchiveConversation(conversation))} />
+          <ConversationMenuItem icon={Trash2} label="Delete" onClick={() => void handleDeleteConversation(conversation)} danger />
+        </>
+      )}
+    </div>
+  )
 
   return (
     <div className={cn("ceaser-chat relative flex h-full overflow-hidden text-foreground", "bg-[#040714]")}>
@@ -1289,7 +1384,7 @@ export function ChatPage() {
               </div>
             </div>
 
-            <div className="mt-2 grid grid-cols-4 gap-0.5 px-3">
+            <div className="mt-2 grid grid-cols-5 gap-0.5 px-3">
               {([["all", "All"], ["pinned", "Pinned"], ["today", "Today"], ["week", "This Week"]] as const).map(([value, label]) => (
                 <button
                   key={value}
@@ -1298,11 +1393,21 @@ export function ChatPage() {
                     setShowArchivedChats(false)
                     setConversationFilter(value)
                   }}
-                  className={cn("rounded-md px-1 py-1.5 text-[10px] font-medium transition", conversationFilter === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary/70 hover:text-foreground")}
+                  className={cn("rounded-md px-1 py-1.5 text-[10px] font-medium transition", !showArchivedChats && conversationFilter === value ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary/70 hover:text-foreground")}
                 >
                   {label}
                 </button>
               ))}
+              <button
+                onClick={() => {
+                  setShowSavedResponses(false)
+                  setShowArchivedChats(true)
+                  setConversationFilter("all")
+                }}
+                className={cn("rounded-md px-1 py-1.5 text-[10px] font-medium transition", showArchivedChats ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary/70 hover:text-foreground")}
+              >
+                Archived
+              </button>
             </div>
           </>
         )}
@@ -1363,19 +1468,14 @@ export function ChatPage() {
                     </div>
                   </button>
                   <button
-                    onClick={() => setOpenConversationMenuId(openConversationMenuId === conversation.id ? null : conversation.id)}
-                    className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground opacity-0 transition hover:bg-secondary hover:text-foreground group-hover:opacity-100"
+                    onClick={() => { setMoveConversationId(null); setOpenConversationMenuId(openConversationMenuId === conversation.id ? null : conversation.id) }}
+                    className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground opacity-100 transition hover:bg-secondary hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
+                    aria-label={`Options for ${conversation.title}`}
                   >
                     <MoreHorizontal className="h-4 w-4" />
                   </button>
                   {openConversationMenuId === conversation.id && (
-                    <div className="absolute right-2 top-11 z-30 w-48 rounded-2xl border border-border bg-popover p-2 shadow-2xl">
-                      <ConversationMenuItem icon={Edit3} label="Rename" onClick={() => void handleRenameConversation(conversation)} />
-                      <ConversationMenuItem icon={conversation.pinned ? PinOff : Pin} label={conversation.pinned ? "Unpin" : "Pin"} onClick={() => void handleTogglePinConversation(conversation)} />
-                      <ConversationMenuItem icon={Share2} label="Share" onClick={() => void handleShareConversation(conversation)} />
-                      <ConversationMenuItem icon={conversation.archived ? RotateCcw : Archive} label={conversation.archived ? "Unarchive" : "Archive"} onClick={() => void (conversation.archived ? handleUnarchiveConversation(conversation) : handleArchiveConversation(conversation))} />
-                      <ConversationMenuItem icon={Trash2} label="Delete" onClick={() => void handleDeleteConversation(conversation)} danger />
-                    </div>
+                    renderConversationMenu(conversation, "right-2 top-11")
                   )}
                 </div>
               ))}
@@ -1387,14 +1487,14 @@ export function ChatPage() {
       </aside>
 
       <main className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col">
-        <section className="relative flex min-h-0 w-full flex-1 flex-col px-8 pb-5 lg:px-16">
-          {messages.length ? <header className="-mx-8 flex h-20 shrink-0 items-center border-b border-white/[0.08] px-8 lg:-mx-16 lg:px-10"><h1 className="truncate text-lg font-semibold text-white">{activeConversation?.title || firstMeaningfulLine(messages.find((item) => item.role === "user")?.content || "CEASER conversation")}</h1>{activeConversation ? <><button onClick={() => void handleTogglePinConversation(activeConversation)} className={cn("ml-3 transition hover:text-cyan-200", activeConversation.pinned ? "text-cyan-300" : "text-white/55")} title={activeConversation.pinned ? "Unpin chat" : "Pin chat"} aria-label={activeConversation.pinned ? "Unpin chat" : "Pin chat"}><Star className={cn("h-4 w-4", activeConversation.pinned && "fill-current")} /></button><div className="relative ml-auto"><button onClick={() => setOpenConversationMenuId(openConversationMenuId === activeConversation.id ? null : activeConversation.id)} className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white" aria-label="Chat options"><MoreHorizontal className="h-5 w-5" /></button>{openConversationMenuId === activeConversation.id ? <div className="absolute right-0 top-11 z-40 w-48 rounded-2xl border border-border bg-popover p-2 shadow-2xl"><ConversationMenuItem icon={Edit3} label="Rename" onClick={() => void handleRenameConversation(activeConversation)} /><ConversationMenuItem icon={activeConversation.pinned ? PinOff : Pin} label={activeConversation.pinned ? "Unpin" : "Pin"} onClick={() => void handleTogglePinConversation(activeConversation)} /><ConversationMenuItem icon={activeConversation.archived ? RotateCcw : Archive} label={activeConversation.archived ? "Unarchive" : "Archive"} onClick={() => void (activeConversation.archived ? handleUnarchiveConversation(activeConversation) : handleArchiveConversation(activeConversation))} /><ConversationMenuItem icon={Trash2} label="Delete" onClick={() => void handleDeleteConversation(activeConversation)} danger /></div> : null}</div></> : null}</header> : null}
+        <section className={cn("relative flex min-h-0 w-full flex-1 flex-col px-4 pb-4 pt-12 md:px-8 md:pb-5 md:pt-0 lg:px-16", guestDemo && "min-[520px]:px-8 min-[520px]:pb-5 min-[520px]:pt-0")}>
+          {messages.length ? <header className={cn("-mx-4 flex h-16 shrink-0 items-center border-b border-white/[0.08] px-4 md:-mx-8 md:h-20 md:px-8 lg:-mx-16 lg:px-10", guestDemo && "min-[520px]:-mx-8 min-[520px]:h-20 min-[520px]:px-8")}><h1 className="truncate text-base font-semibold text-white md:text-lg">{activeConversation?.title || firstMeaningfulLine(messages.find((item) => item.role === "user")?.content || "CEASER conversation")}</h1>{activeConversation ? <><button onClick={() => void handleTogglePinConversation(activeConversation)} className={cn("ml-3 transition hover:text-cyan-200", activeConversation.pinned ? "text-cyan-300" : "text-white/55")} title={activeConversation.pinned ? "Unpin chat" : "Pin chat"} aria-label={activeConversation.pinned ? "Unpin chat" : "Pin chat"}><Star className={cn("h-4 w-4", activeConversation.pinned && "fill-current")} /></button><div className="relative ml-auto"><button onClick={() => { setMoveConversationId(null); setOpenConversationMenuId(openConversationMenuId === activeConversation.id ? null : activeConversation.id) }} className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white" aria-label="Chat options"><MoreHorizontal className="h-5 w-5" /></button>{openConversationMenuId === activeConversation.id ? renderConversationMenu(activeConversation, "right-0 top-11") : null}</div></> : null}</header> : null}
           <div
             ref={chatScrollRef}
             onScroll={captureScrollPosition}
             onWheel={stopFollowingStream}
             onTouchStart={stopFollowingStream}
-            className={cn("min-h-0 flex-1 overflow-x-hidden overflow-y-auto pr-3", messages.length || isBooting || isActiveChatLoading ? "pt-10" : "pt-[9vh]")}
+            className={cn("min-h-0 flex-1 overflow-x-hidden overflow-y-auto pr-1 md:pr-3", messages.length || isBooting || isActiveChatLoading ? "pt-5 md:pt-10" : "flex flex-col justify-end pb-8 pt-8 md:pb-[7vh]")}
           >
             {loadError && (
               <div className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
@@ -1408,34 +1508,12 @@ export function ChatPage() {
                   <span className="ceaser-gradient-text">{typedWelcomePrompt}</span><span className="ceaser-typewriter-caret" aria-hidden="true" />
                 </h1>
 
-                <div className="ceaser-composer mx-auto mt-10 flex min-h-[156px] w-full max-w-[980px] flex-col rounded-[22px] p-5 backdrop-blur-2xl">
+                <div className="ceaser-composer mx-auto mt-10 flex min-h-[112px] w-full max-w-[980px] flex-col rounded-[18px] px-4 py-3 backdrop-blur-2xl">
                   <input ref={chatFileInputRef} type="file" className="hidden" accept=".pdf,.docx,.pptx,.xlsx,.txt,.png,.jpg,.jpeg" onChange={(event) => void handleChatFileUpload(event)} />
-                  <input ref={chatComposerRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && handleSend()} placeholder="Ask anything or give a command..." className="min-h-14 w-full bg-transparent text-base text-white outline-none placeholder:text-white/50" />
-                  <div className="mt-auto flex items-center gap-3">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button
-                          className={cn(
-                            "flex h-11 items-center gap-2 rounded-full border border-white/10 bg-white/[0.025] px-3 text-white/75 transition hover:bg-white/[0.05] hover:text-white",
-                            modelPreference !== "auto" && "border-cyan-300/30 bg-cyan-300/8 text-cyan-100",
-                          )}
-                          aria-label={`Choose CEASER model. Current: ${selectedModelLabel}`}
-                        >
-                          <Sparkles className="h-4 w-4" />
-                          <span className="max-w-28 truncate text-xs font-medium">{selectedModelLabel}</span>
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" side="top" sideOffset={12} className="w-[260px] border-white/10 bg-[#050914]/98 p-2 text-white shadow-2xl backdrop-blur-xl">
-                        <DropdownMenuRadioGroup value={modelPreference} onValueChange={setModelPreference} className="space-y-1">
-                          {hfTextModelOptions.map((item) => (
-                            <DropdownMenuRadioItem key={item.id} value={item.id} className="rounded-lg px-2.5 py-2 text-sm font-medium text-white data-[state=checked]:bg-white/[0.06]">
-                              {item.label}
-                            </DropdownMenuRadioItem>
-                          ))}
-                        </DropdownMenuRadioGroup>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <button onClick={() => chatFileInputRef.current?.click()} className="flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-white/[0.025] text-white/70"><Plus className="h-5 w-5" /></button>
+                  <textarea ref={chatComposerRef} rows={1} value={input} onChange={(event) => updateComposer(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void handleSend() } }} placeholder="Ask anything or give a command..." className="min-h-8 max-h-[120px] w-full resize-none overflow-y-auto bg-transparent py-1 text-base leading-6 text-white outline-none placeholder:text-white/50" />
+                  <LivePromptSuggestions suggestions={autocompleteSuggestions} onSelect={updateComposer} />
+                  <div className="mt-2 flex items-end gap-3">
+                    <button onClick={() => chatFileInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.025] text-white/70 transition hover:bg-white/[0.07]" title="Attach a file" aria-label="Attach a file"><Paperclip className="h-4 w-4" /></button>
                     <button onClick={() => void handleSend()} disabled={!input.trim()} className="ml-auto flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 to-blue-600 text-white shadow-[0_0_28px_rgba(0,174,255,.35)] disabled:opacity-45"><Send className="h-5 w-5" /></button>
                   </div>
                 </div>
@@ -1479,7 +1557,7 @@ export function ChatPage() {
               </div>
             ) : null}
 
-            <div className="ceaser-conversation-composer mx-auto flex min-h-[96px] w-full max-w-[980px] flex-col rounded-[20px] px-5 py-4 backdrop-blur-2xl">
+            <div className="ceaser-conversation-composer mx-auto flex min-h-[72px] w-full max-w-[980px] flex-col rounded-[18px] px-4 py-3 backdrop-blur-2xl">
               <input
                 ref={chatFileInputRef}
                 type="file"
@@ -1487,17 +1565,18 @@ export function ChatPage() {
                 accept=".pdf,.docx,.pptx,.xlsx,.txt,.png,.jpg,.jpeg"
                 onChange={(event) => void handleChatFileUpload(event)}
               />
-              <input
+              <textarea
                 ref={chatComposerRef}
-                type="text"
+                rows={1}
                 value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && handleSend()}
+                onChange={(event) => updateComposer(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void handleSend() } }}
                 placeholder="Ask anything or give a command..."
                 disabled={isLoading}
-                className="h-10 min-w-0 w-full bg-transparent text-base text-white outline-none placeholder:text-white/45 disabled:opacity-50"
+                className="min-h-8 max-h-[120px] min-w-0 w-full resize-none overflow-y-auto bg-transparent py-1 text-base leading-6 text-white outline-none placeholder:text-white/45 disabled:opacity-50"
               />
-              <div className="mt-auto flex items-center gap-3"><button onClick={() => chatFileInputRef.current?.click()} disabled={isUploadingFile} className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 hover:bg-white/[0.06]">{isUploadingFile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button>{isLoading ? <button onClick={cancelActiveStream} className="ml-auto flex h-11 w-11 items-center justify-center rounded-full bg-rose-500 text-white"><Square className="h-4 w-4 fill-current" /></button> : <button onClick={() => void handleSend()} disabled={!input.trim()} className="ml-auto flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-purple-700 text-white shadow-[0_0_24px_rgba(124,58,237,.38)] disabled:opacity-45"><Send className="h-4 w-4" /></button>}</div>
+              <LivePromptSuggestions suggestions={autocompleteSuggestions} onSelect={updateComposer} />
+              <div className="mt-2 flex items-end gap-3"><button onClick={() => chatFileInputRef.current?.click()} disabled={isUploadingFile} className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 hover:bg-white/[0.06]" title="Attach a file" aria-label="Attach a file">{isUploadingFile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button>{isLoading ? <button onClick={cancelActiveStream} className="ml-auto flex h-10 w-10 items-center justify-center rounded-full bg-rose-500 text-white"><Square className="h-4 w-4 fill-current" /></button> : <button onClick={() => void handleSend()} disabled={!input.trim()} className="ml-auto flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-purple-700 text-white shadow-[0_0_24px_rgba(124,58,237,.38)] disabled:opacity-45"><Send className="h-4 w-4" /></button>}</div>
             </div>
             <p className="mt-2 text-center text-[11px] text-white/35">CEASER can make mistakes. Please verify important information.</p>
           </div>
@@ -1674,6 +1753,22 @@ function StructuredList({ title, items, tone = "cyan" }: { title: string; items:
   return <section className="rounded-xl border border-white/10 bg-black/15 p-3"><p className={cn("text-xs font-semibold uppercase tracking-[0.14em]", tone === "amber" ? "text-amber-200" : "text-cyan-200")}>{title}</p><ul className="mt-2 space-y-1.5 text-sm text-white/70">{items.map((item, index) => <li key={`${item}-${index}`} className="flex gap-2"><span className={tone === "amber" ? "text-amber-300" : "text-cyan-300"}>•</span><span>{item}</span></li>)}</ul></section>
 }
 
+function LivePromptSuggestions({ suggestions, onSelect }: { suggestions: string[]; onSelect: (suggestion: string) => void }) {
+  if (!suggestions.length) return null
+  return <div className="mt-2 flex gap-2 overflow-x-auto pb-1" aria-label="Related suggestions">{suggestions.map((suggestion) => <button key={suggestion} type="button" onClick={() => onSelect(suggestion)} className="shrink-0 rounded-full border border-cyan-300/15 bg-cyan-300/[0.05] px-3 py-1.5 text-xs text-cyan-100/80 transition hover:border-cyan-300/35 hover:bg-cyan-300/10 hover:text-cyan-50">{suggestion}</button>)}</div>
+}
+
+function ChatLoadingState({ mode = "thinking" }: { mode?: Message["loadingMode"] }) {
+  const config: Record<NonNullable<Message["loadingMode"]>, { label: string; orb: OrbState }> = {
+    solving: { label: "Solving...", orb: "solving" },
+    searching: { label: "Agent searching...", orb: "searching" },
+    working: { label: "Working...", orb: "working" },
+    thinking: { label: "Thinking...", orb: "breathing" },
+  }
+  const active = config[mode]
+  return <div className="mb-3 inline-flex h-9 items-center gap-2.5 rounded-full border border-violet-300/15 bg-violet-400/[0.07] px-3 text-xs font-medium text-violet-100/85 shadow-[0_0_18px_rgba(139,92,246,.08)]" role="status"><ThinkingOrb state={active.orb} size={20} theme="dark" aria-label={active.label} /><span>{active.label}</span></div>
+}
+
 function ChatBubble({
   message,
   previousUserPrompt,
@@ -1690,17 +1785,17 @@ function ChatBubble({
   const isUser = message.role === "user"
   return (
     <div className={cn("flex w-full gap-4", isUser ? "justify-end" : "justify-start")}>
-      {!isUser && <div className="mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-violet-500/45 bg-violet-500/10 text-violet-300 shadow-[0_0_24px_rgba(139,92,246,.14)]"><Sparkles className="h-5 w-5" /></div>}
-      <div className={cn(isUser ? "max-w-[68%] text-white" : "min-w-0 flex-1 text-white")}>
-        {!isUser && <div className="mb-3 flex items-center gap-3"><span className="font-semibold text-violet-400">CEASER</span><span className="text-xs text-white/40">{message.timestamp}</span>{!message.isTyping && !message.isStreaming ? <span className="ml-auto inline-flex items-center gap-2 rounded-full bg-emerald-500/[0.07] px-4 py-2 text-xs text-emerald-400"><Check className="h-3.5 w-3.5" />Completed</span> : null}</div>}
-        {message.isTyping ? (
-          <div className="flex items-center gap-2 text-white/55">
-            <Loader2 className="h-4 w-4 animate-spin" aria-label="Generating response" />
-          </div>
-        ) : (
-          <>
+      <div className={cn(isUser ? "group/user relative max-w-[78%] pb-7 text-white md:max-w-[68%]" : "min-w-0 flex-1 text-white")}>
+        {!isUser && <div className="mb-3 flex items-center gap-2"><Image src={ceaserFavicon} alt="CEASER" className="h-7 w-7 rounded-full" /><span className="text-xs text-white/40">{message.timestamp}</span>{!message.isTyping && !message.isStreaming ? <span className={cn("ml-auto inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs", message.statusLabel === "Interrupted" ? "bg-amber-500/[0.07] text-amber-400" : "bg-emerald-500/[0.07] text-emerald-400")}>{message.statusLabel === "Interrupted" ? <RefreshCw className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}{message.statusLabel || "Completed"}</span> : null}</div>}
+        {!isUser && (message.isTyping || message.isStreaming) ? <ChatLoadingState mode={message.loadingMode} /> : null}
+        {message.isTyping && !message.content ? null : <>
           <div className={cn(isUser ? "rounded-2xl border border-violet-500/45 bg-gradient-to-br from-violet-500/[0.16] to-purple-900/[0.16] px-5 py-4 shadow-[0_14px_45px_rgba(76,29,149,.12)]" : "rounded-2xl border border-white/[0.12] bg-[#080d1b]/76 p-5 shadow-[0_20px_60px_rgba(0,0,0,.2)]")}>
             {isUser && <div className="mb-2 flex items-center justify-between text-xs"><span className="font-semibold text-violet-300">You</span><span className="text-white/45">{message.timestamp}</span></div>}
+            {message.role === "assistant" && message.workflow && !message.isStreaming && (
+              <div className="mb-4">
+                <WorkflowCard workflow={message.workflow} isStreaming={message.isStreaming} />
+              </div>
+            )}
             {message.role === "assistant" && !message.isStreaming && message.richResponse && hasStructuredRichContent(message.richResponse)
               ? <RichResponseRenderer response={message.richResponse} onAction={onPromptSelect} />
               : message.role === "assistant" && message.isStreaming && message.content.trimStart().startsWith("{")
@@ -1719,22 +1814,12 @@ function ChatBubble({
             ) : message.role === "assistant" && !message.isStreaming && message.research?.sources?.some((source) => source.image_url) ? (
               <ResearchImageStrip images={message.research.sources.filter((source) => source.image_url).map((source) => ({ title: source.title, url: source.url, image_url: source.image_url as string, source: source.source }))} />
             ) : null}
-            {message.role === "user" && (
-              <button
-                onClick={() => onEdit(message)}
-                className="ml-auto mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-white/48 transition hover:bg-white/[0.08] hover:text-white"
-                title="Edit and resend message"
-              >
-                <Edit3 className="h-3.5 w-3.5" />
-                Edit
-              </button>
-            )}
           </div>
           {message.role === "assistant" && !message.isStreaming && (
               <ResponseActions message={message} previousUserPrompt={previousUserPrompt} onPromptSelect={onPromptSelect} />
           )}
-          </>
-        )}
+          </>}
+        {isUser ? <button onClick={() => onEdit(message)} className="absolute bottom-0 right-0 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-white/48 opacity-100 transition hover:bg-white/[0.08] hover:text-white focus:opacity-100 sm:opacity-0 sm:group-hover/user:opacity-100" title="Edit and resend message"><Edit3 className="h-3.5 w-3.5" />Edit</button> : null}
       </div>
       {isUser && (
         <div className="mt-1 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-blue-700 text-xs font-semibold text-white">

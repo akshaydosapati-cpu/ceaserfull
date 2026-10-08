@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections.abc import Generator
 
@@ -138,29 +139,51 @@ def test_contribution_merger_removes_duplicates_and_preserves_agents() -> None:
     assert "CEASER coordinated 2 specialist agents" in merged["summary"]
 
 
-def test_orchestrator_multi_agent_collaboration() -> None:
+async def test_orchestrator_multi_agent_collaboration_async() -> None:
     user = current_user_dict()
     db = TestingSessionLocal()
     MemoryService(db).create(user["id"], "project", "Clinilocker is a healthcare startup", {})
 
-    result = CeaserOrchestrator(db).handle_message(user["id"], "Build healthcare SaaS startup plan")
-    db.close()
+    # Enable agents for this test
+    from app.core.config.settings import settings
+    original_value = settings.agents_enabled
+    settings.agents_enabled = True
+    try:
+        result = CeaserOrchestrator(db).handle_message(user["id"], "Build healthcare SaaS startup plan")
+        db.close()
 
-    assert set(result["selected_agents"]) == {"Bolt", "Zeus"}
-    assert result["contributions"] == []
-    assert result["contribution_summary"]
-    assert result["response"]
-    assert "CEASER coordinated" not in result["response"]
+        assert set(result["selected_agents"]) == {"Bolt", "Zeus"}
+        assert result["contributions"] == []
+        assert result["contribution_summary"]
+        assert result["response"]
+        assert "CEASER coordinated" not in result["response"]
+    finally:
+        settings.agents_enabled = original_value
+
+
+def test_orchestrator_multi_agent_collaboration() -> None:
+    asyncio.run(test_orchestrator_multi_agent_collaboration_async())
+
+
+async def test_ceaser_chat_returns_agent_contributions_async() -> None:
+    # Enable agents for this test
+    from app.core.config.settings import settings
+    original_value = settings.agents_enabled
+    settings.agents_enabled = True
+    try:
+        response = client.post(
+            "/ceaser/chat",
+            json={"message": "Build healthcare SaaS startup plan"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert set(payload["selected_agents"]) == {"Bolt", "Zeus"}
+        assert payload["contribution_summary"]
+        assert payload["contributions"] == []
+    finally:
+        settings.agents_enabled = original_value
 
 
 def test_ceaser_chat_returns_agent_contributions() -> None:
-    response = client.post(
-        "/ceaser/chat",
-        json={"message": "Build healthcare SaaS startup plan"},
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert set(payload["selected_agents"]) == {"Bolt", "Zeus"}
-    assert payload["contribution_summary"]
-    assert payload["contributions"] == []
+    asyncio.run(test_ceaser_chat_returns_agent_contributions_async())

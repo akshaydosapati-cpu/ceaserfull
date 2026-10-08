@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from __future__ import annotations
+
 from io import BytesIO
 import textwrap
 
-import fitz
+try:
+    import fitz
+except ImportError:
+    fitz = None
 
 
 class PDFGenerator:
     content_type = "application/pdf"
 
     def generate(self, title: str, sections: list[tuple[str, str]]) -> bytes:
+        if fitz is None:
+            raise RuntimeError("PyMuPDF (fitz) is required for PDF generation")
         document = fitz.open()
         page = document.new_page()
         y = 52

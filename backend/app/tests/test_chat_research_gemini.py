@@ -1,4 +1,5 @@
 import os
+import time
 from collections.abc import Generator
 
 os.environ["DATABASE_URL"] = "sqlite://"
@@ -13,7 +14,7 @@ from app.core.database.base import Base
 from app.core.database.session import get_db
 from app.core.security.dependencies import get_current_user
 from app.engines.research_engine.engine import ResearchEngine
-from app.engines.research_engine.page_extractor import PageExtractor
+from app.engines.research_engine.page_extractor import ExtractedPage, PageExtractor
 from app.engines.research_engine.schemas import ResearchResult, ResearchSource
 from app.engines.research_engine.search_provider import DuckDuckGoSearchProvider, SerperSearchProvider
 from app.engines.research_engine.source_collector import SourceCollector
@@ -110,7 +111,7 @@ def test_conversation_title_and_message_persistence() -> None:
     messages = ConversationService(db).list_messages(conversation_id=conversation["id"])
     db.close()
 
-    assert restored.title == "Build Healthcare Startup"
+    assert restored.title == "Healthcare Startup"
     assert [message.role for message in messages] == ["user", "assistant"]
 
 
@@ -155,6 +156,159 @@ def test_stable_factual_question_uses_direct_chat() -> None:
     assert decision.route is KnowledgeRoute.GENERAL
 
 
+def test_freshness_signal_overrides_follow_up_route() -> None:
+    decision = KnowledgeRouter().classify(
+        message="What is the latest AI news today?",
+        has_attached_files=False,
+        is_follow_up=True,
+    )
+
+    assert decision.route is KnowledgeRoute.RESEARCH
+
+
+def test_stable_follow_up_remains_conversation_route() -> None:
+    decision = KnowledgeRouter().classify(
+        message="Explain that in simpler words.",
+        has_attached_files=False,
+        is_follow_up=True,
+    )
+
+    assert decision.route is KnowledgeRoute.FOLLOW_UP
+
+
+def test_emerging_model_name_uses_live_research() -> None:
+    decision = KnowledgeRouter().classify(
+        message="What do you know about GPT-6 Astra?",
+        has_attached_files=False,
+        is_follow_up=False,
+    )
+
+    assert decision.route is KnowledgeRoute.RESEARCH
+
+
+def test_knowledge_cutoff_follow_up_uses_live_research() -> None:
+    decision = KnowledgeRouter().classify(
+        message="Just tell me till which year you have data.",
+        has_attached_files=False,
+        is_follow_up=True,
+    )
+
+    assert decision.route is KnowledgeRoute.RESEARCH
+
+
+def test_likely_gpt_typo_uses_live_research() -> None:
+    decision = KnowledgeRouter().classify(
+        message="What do you know about got 6 Astra?",
+        has_attached_files=False,
+        is_follow_up=False,
+    )
+
+    assert decision.route is KnowledgeRoute.RESEARCH
+
+
+def test_emerging_model_research_query_preserves_full_name() -> None:
+    from app.services.orchestrator.orchestrator import CeaserOrchestrator
+
+    orchestrator = CeaserOrchestrator.__new__(CeaserOrchestrator)
+
+    assert orchestrator._research_query("What do you know about GPT-6 Astra?") == "GPT-6 Astra"
+    assert orchestrator._research_query("What do you know about got 6 Astra?") == "GPT 6 Astra"
+
+
+def test_latest_gpt_release_builds_specific_live_query() -> None:
+    from app.services.orchestrator.orchestrator import CeaserOrchestrator
+
+    orchestrator = CeaserOrchestrator.__new__(CeaserOrchestrator)
+
+    assert orchestrator._research_query("What do you know about the latest release of GPT model 2026?") == (
+        "GPT model 2026 latest release official"
+    )
+
+
+def test_latest_release_query_is_entity_agnostic() -> None:
+    from app.services.orchestrator.orchestrator import CeaserOrchestrator
+
+    orchestrator = CeaserOrchestrator.__new__(CeaserOrchestrator)
+
+    assert orchestrator._research_query("What is the latest release of Gemini model 2026?") == (
+        "Gemini model 2026 latest release official"
+    )
+    assert orchestrator._research_query("Tell me the newest release of Acme Platform?") == (
+        "Acme Platform latest release official"
+    )
+    assert orchestrator._research_query("What are the latest Tesla earnings in 2026?") == (
+        "latest Tesla earnings in 2026"
+    )
+
+
+def test_corporate_acquisition_routes_to_research_with_both_companies() -> None:
+    from app.services.orchestrator.orchestrator import CeaserOrchestrator
+
+    message = "Do you know anything about NVIDIA aquisition of Hugging Face?"
+    decision = KnowledgeRouter().classify(message=message, has_attached_files=False, is_follow_up=False)
+    orchestrator = CeaserOrchestrator.__new__(CeaserOrchestrator)
+
+    assert decision.route is KnowledgeRoute.RESEARCH
+    assert orchestrator._research_query(message) == "NVIDIA acquisition of Hugging Face latest official"
+
+
+def test_acquisition_concept_question_stays_general() -> None:
+    decision = KnowledgeRouter().classify(
+        message="Explain acquisition accounting in simple terms.",
+        has_attached_files=False,
+        is_follow_up=False,
+    )
+
+    assert decision.route is KnowledgeRoute.GENERAL
+
+
+def test_live_event_flows_from_classification_into_llm_prompt(monkeypatch) -> None:
+    from app.services.orchestrator.orchestrator import CeaserOrchestrator
+
+    db = TestingSessionLocal()
+    user = override_current_user()
+    orchestrator = CeaserOrchestrator(db)
+    queries: list[str] = []
+
+    def fake_research(query: str, selected_agent_names: list[str]) -> ResearchResult:
+        queries.append(query)
+        return ResearchResult(
+            query=query,
+            summary="Collected current evidence.",
+            key_findings=["NVIDIA announced an acquisition of Hugging Face."],
+            sources=[
+                ResearchSource(
+                    title="NVIDIA to Acquire Hugging Face",
+                    url="https://blogs.nvidia.com/example",
+                    source="NVIDIA",
+                    snippet="Official announcement",
+                    score=10,
+                )
+            ],
+            citations=[],
+            images=[],
+        )
+
+    monkeypatch.setattr(orchestrator, "_maybe_research", fake_research)
+    prepared = orchestrator.prepare_stream_request(
+        user_id=user.id,
+        message="Do you know anything about NVIDIA acquisition of Hugging Face?",
+        request_id="live-event-flow",
+    )
+    instructions, prompt = orchestrator.response_pipeline._build_prompt(
+        message=prepared["message"],
+        context=prepared["context"],
+    )
+    db.close()
+
+    assert prepared["observability"]["knowledge_route"] == "research"
+    assert prepared["observability"]["web_search_requested"] is True
+    assert queries == ["NVIDIA acquisition of Hugging Face latest official"]
+    assert "treat its sources as the authority" in instructions
+    assert "NVIDIA to Acquire Hugging Face" in prompt
+    assert "Official announcement" in prompt
+
+
 def test_serper_search_returns_ranked_results_and_images(monkeypatch) -> None:
     class Response:
         def __init__(self, payload: dict):
@@ -173,20 +327,101 @@ def test_serper_search_returns_ranked_results_and_images(monkeypatch) -> None:
         def __exit__(self, *args):
             return None
 
-        def post(self, url, headers, json):
+        def post(self, url, headers, json, timeout):
             assert headers["X-API-KEY"] == "test-key"
             assert json["q"] == "India defence"
             if url.endswith("/images"):
                 return Response({"images": [{"title": "Indian tank", "link": "https://example.com/tank", "imageUrl": "https://images.example.com/tank.jpg", "source": "Example"}]})
             return Response({"organic": [{"title": "India defence", "link": "https://example.com/defence", "domain": "example.com", "snippet": "Defence overview"}]})
 
-    monkeypatch.setattr("httpx.Client", lambda **kwargs: Client())
+    monkeypatch.setattr("app.engines.research_engine.search_provider.research_http_client", lambda: Client())
     provider = SerperSearchProvider(api_key="test-key")
     sources = provider.search("India defence", limit=3)
     images = provider.search_images("India defence", limit=3)
 
     assert sources[0]["url"] == "https://example.com/defence"
     assert images[0]["image_url"] == "https://images.example.com/tank.jpg"
+
+
+def test_source_extraction_is_bounded_concurrent_and_keeps_all_ranked_sources() -> None:
+    class ManySources:
+        def search(self, query: str, limit: int = 6) -> list[dict]:
+            return [
+                {"title": f"Current evidence {index}", "url": f"https://example.com/{index}", "source": "Example", "snippet": f"Relevant 2026 evidence {index}"}
+                for index in range(6)
+            ]
+
+        def search_images(self, query: str, limit: int = 3) -> list[dict]:
+            return []
+
+    class SlowExtractor:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        def extract(self, url: str, query: str) -> ExtractedPage:
+            self.urls.append(url)
+            time.sleep(0.12)
+            return ExtractedPage(url=url, title=None, publisher="Example", excerpt="Verified evidence", retrieved_at="now")
+
+    extractor = SlowExtractor()
+    collector = SourceCollector(provider=ManySources(), page_extractor=extractor)
+    started = time.perf_counter()
+    sources = collector.collect_sources("current evidence 2026")
+    elapsed = time.perf_counter() - started
+
+    assert len(sources) == 6
+    assert len(extractor.urls) == 3
+    assert elapsed < 0.28
+    assert collector.last_timings["sources_extracted"] == 3
+
+
+def test_failed_source_does_not_discard_other_research_evidence() -> None:
+    class Sources:
+        def search(self, query: str, limit: int = 6) -> list[dict]:
+            return [
+                {"title": f"Evidence {index}", "url": f"https://example.com/{index}", "source": "Example", "snippet": f"Usable snippet {index}"}
+                for index in range(3)
+            ]
+
+        def search_images(self, query: str, limit: int = 3) -> list[dict]:
+            return []
+
+    class PartialExtractor:
+        def extract(self, url: str, query: str) -> ExtractedPage | None:
+            if url.endswith("/1"):
+                raise TimeoutError("slow source")
+            return ExtractedPage(url=url, title=None, publisher="Example", excerpt="Extracted evidence", retrieved_at="now")
+
+    result = ResearchEngine(source_collector=SourceCollector(provider=Sources(), page_extractor=PartialExtractor())).research(
+        "current evidence 2026",
+        include_images=False,
+    )
+
+    assert len(result.sources) == 3
+    assert any(source.snippet == "Usable snippet 1" for source in result.sources)
+    assert sum(bool(source.excerpt) for source in result.sources) == 2
+    assert result.timings["extraction_ms"] >= 0
+
+
+def test_visual_research_loads_sources_and_images_concurrently() -> None:
+    class Collector:
+        last_timings = {"search_ms": 1.0, "ranking_ms": 1.0, "extraction_ms": 1.0}
+
+        def collect_sources(self, query: str) -> list[ResearchSource]:
+            time.sleep(0.12)
+            return [ResearchSource(title="Source", url="https://example.com", source="Example", snippet="Evidence")]
+
+        def collect_images(self, query: str) -> list[dict]:
+            time.sleep(0.12)
+            return [{"title": "Image", "url": "https://example.com", "image_url": "https://example.com/image.jpg", "source": "Example"}]
+
+    started = time.perf_counter()
+    result = ResearchEngine(source_collector=Collector()).research("visual topic", include_images=True)
+    elapsed = time.perf_counter() - started
+
+    assert len(result.sources) == 1
+    assert len(result.images) == 1
+    assert elapsed < 0.22
 
 
 def test_duckduckgo_provider_does_not_fallback_to_search_url(monkeypatch) -> None:

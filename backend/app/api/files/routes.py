@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File as UploadFileField, Form, HTTPExcep
 from sqlalchemy.orm import Session
 
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.access_control import require_file_access, require_project_access
 from app.core.security.dependencies import get_current_user
 from app.models.user import User
@@ -14,6 +15,23 @@ from app.services.document_generation import DocumentGenerator
 from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/files", tags=["files"])
+
+
+def _upload_and_audit(db: Session, *, user_id: str, project_id: str | None, filename: str, file_type: str, content: bytes, content_type: str) -> FileRead:
+    file = FileService(db).upload_and_process(
+        user_id=user_id,
+        project_id=project_id,
+        filename=filename,
+        file_type=file_type,
+        content=content,
+        content_type=content_type,
+    )
+    metadata = {"file_type": file.file_type, "bytes": len(content), "pages": file.extraction_metadata.get("pages")}
+    AuditService(db).record(user_id=user_id, action="document_uploaded", resource_type="file", resource_id=file.id, metadata=metadata)
+    AuditService(db).record(user_id=user_id, action="document_read", resource_type="file", resource_id=file.id, metadata=file.extraction_metadata)
+    if file.extraction_metadata.get("ocr"):
+        AuditService(db).record(user_id=user_id, action="ocr_processed", resource_type="file", resource_id=file.id)
+    return file
 
 
 @router.get("", response_model=list[FileRead])
@@ -37,7 +55,9 @@ async def upload_file(
 ):
     content = await upload.read()
     file_type = _file_type(upload.filename or upload.content_type or "document")
-    file = FileService(db).upload_and_process(
+    file = await run_serial_db(
+        _upload_and_audit,
+        db,
         user_id=user.id,
         project_id=project_id,
         filename=upload.filename or "upload",
@@ -45,11 +65,6 @@ async def upload_file(
         content=content,
         content_type=upload.content_type or "application/octet-stream",
     )
-    metadata = {"file_type": file.file_type, "bytes": len(content), "pages": file.extraction_metadata.get("pages")}
-    AuditService(db).record(user_id=user.id, action="document_uploaded", resource_type="file", resource_id=file.id, metadata=metadata)
-    AuditService(db).record(user_id=user.id, action="document_read", resource_type="file", resource_id=file.id, metadata=file.extraction_metadata)
-    if file.extraction_metadata.get("ocr"):
-        AuditService(db).record(user_id=user.id, action="ocr_processed", resource_type="file", resource_id=file.id)
     return file
 
 

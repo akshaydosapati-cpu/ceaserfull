@@ -21,6 +21,7 @@ export interface ConversationRecord {
   title: string
   pinned: boolean
   archived: boolean
+  project_id?: string | null
   created_at: string
 }
 
@@ -145,6 +146,8 @@ export interface ChatRequestOptions {
 }
 
 export const chatApi = {
+  autocomplete: (query: string, signal?: AbortSignal) =>
+    apiRequest<{ suggestions: string[] }>(`/ceaser/chat/autocomplete?query=${encodeURIComponent(query)}`, { signal }),
   sendGuestDemoMessage: (message: string, recentTurns: Array<{ role: "user" | "assistant"; content: string }> = []) =>
     apiRequest<{ response: string; source: string; continuation_count: number }>("/ceaser/demo", {
       method: "POST",
@@ -153,6 +156,7 @@ export const chatApi = {
   listConversations: (archived = false) => {
     const params = new URLSearchParams()
     if (archived) params.set("archived", "true")
+    params.set("limit", "500")
     const query = params.toString() ? `?${params.toString()}` : ""
     return apiRequest<ConversationRecord[]>(`/conversations${query}`, { cacheTtlMs: 300000 })
   },
@@ -164,7 +168,7 @@ export const chatApi = {
       invalidateApiCache(["/conversations", "/chat/conversations"])
       return response
     }),
-  updateConversation: (conversationId: string, updates: Partial<Pick<ConversationRecord, "title" | "pinned" | "archived">>) =>
+  updateConversation: (conversationId: string, updates: Partial<Pick<ConversationRecord, "title" | "pinned" | "archived" | "project_id">>) =>
     apiRequest<ConversationRecord>(`/conversations/${conversationId}`, {
       method: "PATCH",
       body: updates,
@@ -177,6 +181,10 @@ export const chatApi = {
       method: "DELETE",
     }).then((response) => {
       invalidateApiCache([`/conversations/${conversationId}`, "/conversations", `/chat/conversations/${conversationId}/messages`])
+      // Dispatch event to trigger sidebar refetch
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("ceaser:conversations-changed", { detail: { action: "deleted", conversationId } }))
+      }
       return response
     }),
   listMessages: (conversationId: string, limit = 60) =>
@@ -216,13 +224,14 @@ export const chatApi = {
       onComplete?: (response: CeaserChatResponse) => void
       onError?: (message: string) => void
     },
-    options?: { signal?: AbortSignal } & ChatRequestOptions,
+    options?: { signal?: AbortSignal; requestId?: string } & ChatRequestOptions,
   ) =>
     apiStreamRequest(
       "/ceaser/chat/stream",
       {
         method: "POST",
         signal: options?.signal,
+        headers: options?.requestId ? { "X-Request-Id": options.requestId } : undefined,
         body: {
           message,
           conversation_id: conversationId,

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.commercial import (
@@ -92,7 +93,7 @@ async def billing_webhook(request: Request, db: Annotated[Session, Depends(get_d
     raw_body = await request.body()
     signature = request.headers.get("x-razorpay-signature")
     try:
-        event = RazorpayBillingService(db).process_webhook(raw_body, signature)
+        event = await run_serial_db(RazorpayBillingService(db).process_webhook, raw_body, signature)
         return {"status": "processed", "event_id": event.provider_event_id}
     except BillingProviderError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid billing webhook.") from exc

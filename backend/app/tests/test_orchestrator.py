@@ -1,3 +1,4 @@
+import asyncio
 import os
 from uuid import uuid4
 from collections.abc import Generator
@@ -22,6 +23,7 @@ from app.services.orchestrator.memory_retriever import MemoryRetriever
 from app.services.orchestrator.orchestrator import CeaserOrchestrator
 from app.services.orchestrator.knowledge_router import KnowledgeRoute
 from app.services.orchestrator.user_context_resolver import UserContextResolver
+from app.services.conversation_service import ConversationService
 
 
 engine = create_engine(
@@ -69,7 +71,23 @@ def current_user_dict() -> dict:
     return {"id": user.id, "email": user.email}
 
 
-def test_prepare_stream_fast_chat_skips_expensive_services(monkeypatch) -> None:
+def test_memory_lifecycle_reinforces_and_supersedes_locations() -> None:
+    user = current_user_dict()
+    db = TestingSessionLocal()
+    service = MemoryService(db)
+    first = service.create(user["id"], "file", "DBMS notes is in Downloads", {"entity": "dbms notes", "relation": "location"})
+    repeated = service.create(user["id"], "file", "DBMS notes is in Downloads", {"entity": "dbms notes", "relation": "location"})
+    assert repeated.id == first.id
+    assert repeated.extra_metadata["reinforcement_count"] == 2
+    latest = service.create(user["id"], "file", "DBMS notes is in Documents", {"entity": "dbms notes", "relation": "location"})
+    db.refresh(first)
+    assert latest.id != first.id
+    assert first.extra_metadata["status"] == "superseded"
+    assert first.extra_metadata["superseded_by"] == latest.id
+    db.close()
+
+
+async def test_prepare_stream_fast_chat_skips_expensive_services_async(monkeypatch) -> None:
     user = current_user_dict()
     db = TestingSessionLocal()
     orchestrator = CeaserOrchestrator(db)
@@ -81,8 +99,9 @@ def test_prepare_stream_fast_chat_skips_expensive_services(monkeypatch) -> None:
     monkeypatch.setattr(orchestrator, "_maybe_research", unexpected)
     monkeypatch.setattr(orchestrator.memory_retriever, "retrieve_relevant_memories", unexpected)
     monkeypatch.setattr(orchestrator.workflow_orchestrator, "run", unexpected)
+    monkeypatch.setattr(orchestrator, "_default_stream_agents", unexpected)
 
-    prepared = orchestrator.prepare_stream_request(
+    prepared = await orchestrator.prepare_stream_request(
         user_id=user["id"],
         message="Explain recursion in simple terms.",
         request_id="fast-chat-boundary",
@@ -95,16 +114,88 @@ def test_prepare_stream_fast_chat_skips_expensive_services(monkeypatch) -> None:
     assert prepared["observability"]["rag_used"] is False
     assert prepared["observability"]["memory_used"] is False
     assert prepared["observability"]["web_used"] is False
+    assert prepared["selected_agents"] == []
+
+
+def test_prepare_stream_fast_chat_skips_expensive_services(monkeypatch) -> None:
+    asyncio.run(test_prepare_stream_fast_chat_skips_expensive_services_async(monkeypatch))
+
+
+async def test_new_direct_chat_reuses_conversation_and_defers_persistence_async(monkeypatch) -> None:
+    user = current_user_dict()
+    db = TestingSessionLocal()
+    conversation = ConversationService(db).create(user["id"])
+    orchestrator = CeaserOrchestrator(db)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_get_conversation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("conversation was queried again")),
+    )
+    prepared = await orchestrator.prepare_stream_request(
+        user_id=user["id"],
+        message="Explain recursion in simple terms.",
+        conversation_id=conversation.id,
+        conversation=conversation,
+        request_id="reuse-new-conversation",
+    )
+
+    assert prepared["defer_user_turn"] is True
+    assert ConversationService(db).list_messages(conversation.id) == []
+
+    assistant = orchestrator.begin_stream_response(prepared)
+    messages = ConversationService(db).list_messages(conversation.id)
+    db.close()
+
+    assert assistant is not None
+    assert [item.role for item in messages] == ["user", "assistant"]
+    assert messages[0].content == "Explain recursion in simple terms."
+
+
+def test_new_direct_chat_reuses_conversation_and_defers_persistence(monkeypatch) -> None:
+    asyncio.run(test_new_direct_chat_reuses_conversation_and_defers_persistence_async(monkeypatch))
+
+
+async def test_existing_follow_up_keeps_history_and_defers_current_turn_async() -> None:
+    user = current_user_dict()
+    db = TestingSessionLocal()
+    service = ConversationService(db)
+    conversation = service.create(user["id"])
+    service.create_message(conversation.id, "user", "Explain recursion.", ingest_knowledge=False)
+    service.create_message(conversation.id, "assistant", "Recursion is when a function calls itself.", ingest_knowledge=False)
+
+    prepared = await CeaserOrchestrator(db).prepare_stream_request(
+        user_id=user["id"],
+        message="summarize",
+        conversation_id=conversation.id,
+        request_id="follow-up-continuity",
+    )
+    db.close()
+
+    assert prepared["defer_user_turn"] is True
+    assert prepared["follow_up_trace"]["follow_up_detected"] is True
+    assert len(prepared["conversation_context"]["messages"]) == 2
+
+
+def test_existing_follow_up_keeps_history_and_defers_current_turn() -> None:
+    asyncio.run(test_existing_follow_up_keeps_history_and_defers_current_turn_async())
 
 
 def test_user_context_resolver_loads_enabled_agents() -> None:
     user = current_user_dict()
     db = TestingSessionLocal()
-    context = UserContextResolver(db).resolve(user["id"])
-    db.close()
+    # Enable agents for this test
+    from app.core.config.settings import settings
+    original_value = settings.agents_enabled
+    settings.agents_enabled = True
+    try:
+        context = UserContextResolver(db).resolve(user["id"])
+        db.close()
 
-    assert context["scope"]["type"] == "personal_ai_os"
-    assert {agent["name"] for agent in context["enabled_agents"]} == {"Bolt", "Alex", "Friday", "Zeus", "Nova", "Atlas"}
+        assert context["scope"]["type"] == "personal_ai_os"
+        assert {agent["name"] for agent in context["enabled_agents"]} == {"Bolt", "Alex", "Friday", "Zeus", "Nova", "Atlas"}
+    finally:
+        settings.agents_enabled = original_value
 
 
 def test_memory_retrieval_ranks_keyword_project_memory() -> None:
@@ -196,15 +287,22 @@ def test_orchestrator_returns_brain_payload() -> None:
     db = TestingSessionLocal()
     MemoryService(db).create(user["id"], "project", "Clinilocker is a healthcare startup", {})
 
-    result = CeaserOrchestrator(db).handle_message(user["id"], "Create a healthcare startup plan")
-    db.close()
+    # Enable agents for this test
+    from app.core.config.settings import settings
+    original_value = settings.agents_enabled
+    settings.agents_enabled = True
+    try:
+        result = CeaserOrchestrator(db).handle_message(user["id"], "Create a healthcare startup plan")
+        db.close()
 
-    assert result["scope"] == "personal_ai_os"
-    assert "Zeus" in result["selected_agents"]
-    assert result["selected_agents"] == ["Zeus"]
-    assert result["memories_used"]
-    assert result["context_summary"]["memory_count"] >= 1
-    assert result["response"]
+        assert result["scope"] == "personal_ai_os"
+        assert "Zeus" in result["selected_agents"]
+        assert result["selected_agents"] == ["Zeus"]
+        assert result["memories_used"]
+        assert result["context_summary"]["memory_count"] >= 1
+        assert result["response"]
+    finally:
+        settings.agents_enabled = original_value
 
 
 def test_orchestrator_extracts_named_research_query(monkeypatch) -> None:
@@ -219,15 +317,23 @@ def test_orchestrator_extracts_named_research_query(monkeypatch) -> None:
 
     monkeypatch.setattr("app.engines.research_engine.engine.ResearchEngine.research", fake_research)
     db = TestingSessionLocal()
-    result = CeaserOrchestrator(db).handle_message(
-        user["id"],
-        "do some research on Clinilocker and give me the resources you did.",
-    )
-    db.close()
 
-    assert captured_queries == ["Clinilocker"]
-    assert result["selected_agents"] == ["Alex"]
-    assert result["research"]["query"] == "Clinilocker"
+    # Enable agents for this test
+    from app.core.config.settings import settings
+    original_value = settings.agents_enabled
+    settings.agents_enabled = True
+    try:
+        result = CeaserOrchestrator(db).handle_message(
+            user["id"],
+            "do some research on Clinilocker and give me the resources you did.",
+        )
+        db.close()
+
+        assert captured_queries == ["Clinilocker"]
+        assert result["selected_agents"] == ["Alex"]
+        assert result["research"]["query"] == "Clinilocker"
+    finally:
+        settings.agents_enabled = original_value
 
 
 def test_orchestrator_extracts_generic_research_topics() -> None:
@@ -236,6 +342,17 @@ def test_orchestrator_extracts_generic_research_topics() -> None:
     assert orchestrator._research_query("do a research on healthtech 2026 and then give me the resources.") == "healthtech 2026"
     assert orchestrator._research_query("search the web for AI healthcare startups in India and give sources") == "AI healthcare startups in India"
     assert orchestrator._research_query("look up federated data architectures in healthcare") == "federated data architectures in healthcare"
+
+
+def test_orchestrator_initializes_without_name_error() -> None:
+    db = TestingSessionLocal()
+    orchestrator = CeaserOrchestrator(db)
+    db.close()
+
+    assert orchestrator is not None
+    assert orchestrator.agent_registry is not None
+    assert hasattr(orchestrator.agent_registry, "definitions") or hasattr(orchestrator.agent_registry, "get")
+
 
 
 def test_live_research_runs_only_without_internal_context() -> None:
@@ -294,14 +411,21 @@ def test_follow_up_uses_previous_exchange_when_topic_extraction_is_empty(monkeyp
 
 
 def test_ceaser_chat_endpoint() -> None:
-    response = client.post(
-        "/ceaser/chat",
-        json={"message": "Build startup plan and research competitors"},
-    )
+    # Enable agents for this test
+    from app.core.config.settings import settings
+    original_value = settings.agents_enabled
+    settings.agents_enabled = True
+    try:
+        response = client.post(
+            "/ceaser/chat",
+            json={"message": "Build startup plan and research competitors"},
+        )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["scope"] == "personal_ai_os"
-    assert "Zeus" in payload["selected_agents"]
-    assert "Alex" in payload["selected_agents"]
-    assert "response" in payload
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["scope"] == "personal_ai_os"
+        assert "Zeus" in payload["selected_agents"]
+        assert "Alex" in payload["selected_agents"]
+        assert "response" in payload
+    finally:
+        settings.agents_enabled = original_value

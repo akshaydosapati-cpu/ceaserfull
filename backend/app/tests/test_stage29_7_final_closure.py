@@ -39,7 +39,7 @@ def test_multi_output_dag_shares_one_research_result():
     assert plan.steps[1].input_refs == plan.steps[2].input_refs == ["research_result"]
 
 
-def test_production_runner_passes_structured_outputs_without_regeneration(monkeypatch):
+async def test_production_runner_passes_structured_outputs_without_regeneration(monkeypatch):
     db = database(); owner = user(db)
     plan = GoalWorkflowOrchestrator().plan(user_id=owner.id, request="Research safe battery technology and create a report and presentation")
     run = WorkflowManager(db).create_goal_plan(plan)
@@ -50,23 +50,23 @@ def test_production_runner_passes_structured_outputs_without_regeneration(monkey
             return CapabilityOutcome("COMPLETED", {"summary": "grounded", "sources": [{"url": "https://example.com"}]}, "Research completed.", True)
         return CapabilityOutcome("COMPLETED", {"file_id": capability, "sources": kwargs["inputs"]["research_result"]["sources"]}, "Artifact created.", True)
     monkeypatch.setattr(WorkflowCapabilityExecutor, "execute", execute)
-    result = WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
+    result = await WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
     assert result["run"].status == "completed"
     assert seen[1][1]["research_result"] is seen[2][1]["research_result"]
     assert result["outputs"]["document_artifact"]["sources"] == [{"url": "https://example.com"}]
 
 
-def test_missing_gmail_waits_and_does_not_claim_success():
+async def test_missing_gmail_waits_and_does_not_claim_success():
     db = database(); owner = user(db)
     plan = GoalWorkflowOrchestrator().plan(user_id=owner.id, request="Draft an email to test@example.com about the project")
     run = WorkflowManager(db).create_goal_plan(plan)
-    result = WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
+    result = await WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
     assert result["run"].status == "waiting_for_user"
     assert run.steps[-1].status == "waiting_for_user"
     assert run.steps[-1].metadata_json["availability"] == "REQUIRES_INTEGRATION"
 
 
-def test_confirmation_resume_reuses_exact_draft(monkeypatch):
+async def test_confirmation_resume_reuses_exact_draft(monkeypatch):
     db = database(); owner = user(db)
     integration = Integration(user_id=owner.id, provider="gmail", status="connected")
     integration.access_token = "test-token"
@@ -75,16 +75,27 @@ def test_confirmation_resume_reuses_exact_draft(monkeypatch):
     run = WorkflowManager(db).create_goal_plan(plan)
     calls = []
     def execute(_self, capability, **kwargs):
-        calls.append((capability, kwargs["inputs"], kwargs["confirmed"]))
+        calls.append((capability, kwargs))
         if capability == "email.create_draft":
             return CapabilityOutcome("COMPLETED", {"id": "draft-1", "to": "test@example.com", "subject": "Project", "body": "Ready"}, "Draft ready.", True)
-        return CapabilityOutcome("COMPLETED", {"message_id": "sent-1", "draft_id": kwargs["inputs"]["email_draft"]["id"]}, "Email sent.", True)
+        if capability == "email.send":
+            # When email.send is called, it receives inputs containing the email_draft output
+            inputs = kwargs.get("inputs", {})
+            draft_body = inputs["email_draft"]["body"] if "email_draft" in inputs else None
+            return CapabilityOutcome("COMPLETED", {"message_id": "sent-1", "draft_id": "draft-1"}, "Email sent.", True)
+        return CapabilityOutcome("COMPLETED", {}, "OK", True)
     monkeypatch.setattr(WorkflowCapabilityExecutor, "execute", execute)
-    first = WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
+    first = await WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
     assert first["run"].status == "waiting_for_user"
-    second = WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan, confirmed_capability="email.send")
+    second = await WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan, confirmed_capability="email.send")
     assert second["run"].status == "completed"
-    assert calls[-1][1]["email_draft"]["body"] == "Ready"
+    # Check that the draft body was passed to email.send
+    draft_body = None
+    for cap, kwargs in calls:
+        if cap == "email.send":
+            inputs = kwargs.get("inputs", {})
+            draft_body = inputs["email_draft"]["body"] if "email_draft" in inputs else None
+    assert draft_body == "Ready"
     assert [item[0] for item in calls].count("email.create_draft") == 1
 
 
@@ -95,7 +106,7 @@ def test_capability_availability_is_truthful():
     assert service.availability("office.fake_edit", owner.id) == "UNAVAILABLE"
 
 
-def test_missing_capability_replan_is_bounded_and_preserves_outputs():
+async def test_missing_capability_replan_is_bounded_and_preserves_outputs():
     db = database(); owner = user(db, "replan@example.com")
     plan = GoalWorkflowPlan(
         workflow_id="replan-workflow",
@@ -103,13 +114,13 @@ def test_missing_capability_replan_is_bounded_and_preserves_outputs():
         steps=[GoalWorkflowStep(step_id="step_1", capability="office.fake_edit", responsible_agent="Bolt", execution_target="cloud", output_name="result", verification_rule="verified result required")],
     )
     run = WorkflowManager(db).create_goal_plan(plan)
-    result = WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
+    result = await WorkflowExecutor(db).execute_goal_plan(run=run, plan=plan)
     assert result["run"].status == "failed"
     assert result["run"].metadata_json["replan_attempts"] == ["office.fake_edit"]
     assert result["run"].metadata_json["replan_exhausted"] is True
 
 
-def test_native_gmail_and_calendar_write_contracts(monkeypatch):
+async def test_native_gmail_and_calendar_write_contracts(monkeypatch):
     db = database(); owner = user(db, "writes@example.com")
     gmail = Integration(user_id=owner.id, provider="gmail", status="connected")
     calendar = Integration(user_id=owner.id, provider="google-calendar", status="connected")

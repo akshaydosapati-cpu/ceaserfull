@@ -30,7 +30,7 @@ class WorkflowCapabilityExecutor:
     executable = {
         "research.execute", "document.create", "presentation.create",
         "email.create_draft", "email.update_draft", "email.reply_draft", "email.send",
-        "calendar.create_event", "calendar.update_event",
+        "calendar.create_event", "calendar.update_event", "reminder.create",
     }
 
     def __init__(self, db: Session):
@@ -66,6 +66,8 @@ class WorkflowCapabilityExecutor:
             return self._email(capability, user_id, request, inputs)
         if capability.startswith("calendar."):
             return self._calendar(capability, user_id, request, inputs)
+        if capability.startswith("reminder."):
+            return self._reminder(capability, user_id, request, inputs)
         return CapabilityOutcome("FAILED", message=f"Capability unavailable: {capability}")
 
     def _artifact(self, capability: str, user_id: str, request: str, inputs: dict[str, Any]) -> CapabilityOutcome:
@@ -92,17 +94,31 @@ class WorkflowCapabilityExecutor:
             return CapabilityOutcome("WAITING_FOR_USER", message="Which email address should receive the draft?")
         subject = str(draft.get("subject") or self._subject(request))
         body = str(draft.get("body") or self._email_body(request, inputs))
+
+        attachment_bytes = None
+        attachment_filename = None
+        if draft.get("attachment"):
+            attachment_ref = draft.get("attachment")
+            try:
+                storage_path = attachment_ref.get("storage_path") if isinstance(attachment_ref, dict) else str(attachment_ref)
+                filename = attachment_ref.get("filename", "attachment") if isinstance(attachment_ref, dict) else "attachment"
+                attachment_bytes = StorageService().read_bytes(storage_path)
+                attachment_filename = filename
+            except Exception:
+                return CapabilityOutcome("FAILED", message="Could not resolve attachment file.")
+
         if capability == "email.send":
             draft_id = str(draft.get("id") or draft.get("draft_id") or "")
             if not draft_id:
                 return CapabilityOutcome("FAILED", message="The verified Gmail draft is missing.")
             payload = provider.send_draft(integration, draft_id)
-            return CapabilityOutcome("COMPLETED", {"message_id": payload.get("id"), "thread_id": payload.get("threadId"), "draft_id": draft_id}, "Email sent.", bool(payload.get("id")))
+            return CapabilityOutcome("COMPLETED", {"message_id": payload.get("id"), "thread_id": payload.get("threadId"), "draft_id": draft_id, "delivery_status": "submitted"}, "Email sent.", bool(payload.get("id")))
+
         if capability == "email.update_draft":
-            payload = provider.update_draft(integration, str(draft.get("id") or ""), to=recipient, subject=subject, body=body)
+            payload = provider.update_draft(integration, str(draft.get("id") or ""), to=recipient, subject=subject, body=body, attachment_bytes=attachment_bytes, attachment_filename=attachment_filename)
         else:
             payload = provider.create_draft(integration, to=recipient, subject=subject, body=body, thread_id=draft.get("thread_id"), in_reply_to=draft.get("message_id") if capability == "email.reply_draft" else None)
-        return CapabilityOutcome("COMPLETED", {"id": payload.get("id"), "draft_id": payload.get("id"), "to": recipient, "subject": subject, "body": body, "message": payload.get("message")}, "Draft ready.", bool(payload.get("id")))
+        return CapabilityOutcome("COMPLETED", {"id": payload.get("id"), "draft_id": payload.get("id"), "to": recipient, "subject": subject, "body": body, "message": payload.get("message"), "attachment": attachment_filename}, "Draft ready.", bool(payload.get("id")))
 
     def _calendar(self, capability: str, user_id: str, request: str, inputs: dict[str, Any]) -> CapabilityOutcome:
         integration = self._integration(user_id, "google-calendar")
@@ -119,6 +135,27 @@ class WorkflowCapabilityExecutor:
         else:
             payload = provider.create_event(integration, event)
         return CapabilityOutcome("COMPLETED", {"id": payload.get("id"), "status": payload.get("status"), "html_link": payload.get("htmlLink"), **event}, "Calendar event saved.", bool(payload.get("id")))
+
+    def _reminder(self, capability: str, user_id: str, request: str, inputs: dict[str, Any]) -> CapabilityOutcome:
+        integration = self._integration(user_id, "google-calendar")
+        provider = GoogleCalendarProvider()
+        reminder_config = dict(inputs.get("reminder") or {})
+        event_id = str(reminder_config.get("event_id") or "")
+        if not event_id:
+            return CapabilityOutcome("WAITING_FOR_USER", message="Which calendar event should I add a reminder to?")
+        minutes_before = int(reminder_config.get("minutes_before") or 1440)
+        method = str(reminder_config.get("method") or "notification")
+        try:
+            event_update = {
+                "reminders": {
+                    "useDefault": False,
+                    "overrides": [{"method": method, "minutes": minutes_before}]
+                }
+            }
+            payload = provider.update_event(integration, event_id, event_update)
+            return CapabilityOutcome("COMPLETED", {"event_id": event_id, "reminder_minutes": minutes_before, "reminder_method": method, "status": payload.get("status")}, f"Reminder set for {minutes_before} minutes before the event.", bool(payload.get("id")))
+        except Exception as exc:
+            return CapabilityOutcome("FAILED", message=f"Could not set reminder: {str(exc)}")
 
     def _integration(self, user_id: str, provider: str) -> Integration | None:
         return self.db.query(Integration).filter(Integration.user_id == user_id, Integration.provider == provider, Integration.status == "connected").first()

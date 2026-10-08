@@ -65,6 +65,13 @@ class ModelRouter:
             self._event("model.attempt_started", request, {"model_id": selection.model.model_id, "attempt": index + 1})
             try:
                 content = await provider.generate(instructions=instructions, input_text=input_text, model=selection.model.provider_model_name, max_output_tokens=max_output_tokens)
+                if not isinstance(content, str) or not content.strip():
+                    raise AIServiceUnavailableError(
+                        "Provider returned no usable text.",
+                        provider=selection.model.provider_id,
+                        category="empty_output",
+                        retryable=True,
+                    )
                 latency = (perf_counter() - started) * 1000
                 self.record_success(selection.model.provider_id, total_ms=latency, model_id=selection.model.model_id)
                 self._event("model.completed", request, {"model_id": selection.model.model_id, "attempt": index + 1, "latency_ms": round(latency, 2)})

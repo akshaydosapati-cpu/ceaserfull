@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from sqlalchemy.orm import Session
 from app.models.mixins import utc_now
 
@@ -32,8 +34,8 @@ class ConversationService:
         self.db.refresh(conversation)
         return conversation
 
-    def update(self, conversation: Conversation, title: str | None = None, pinned: bool | None = None, archived: bool | None = None) -> Conversation:
-        conversation = self.conversations.update(conversation=conversation, title=title, pinned=pinned, archived=archived)
+    def update(self, conversation: Conversation, title: str | None = None, pinned: bool | None = None, archived: bool | None = None, project_id: str | None = None, update_project: bool = False) -> Conversation:
+        conversation = self.conversations.update(conversation=conversation, title=title, pinned=pinned, archived=archived, project_id=project_id, update_project=update_project)
         self.db.commit()
         self.db.refresh(conversation)
         return conversation
@@ -57,6 +59,10 @@ class ConversationService:
         self.db.commit()
         self.db.refresh(conversation)
         return conversation
+
+    def create_pending(self, user_id: str, title: str | None = None) -> Conversation:
+        """Create a conversation in the current transaction without committing."""
+        return self.conversations.create(user_id=user_id, title=title or "New Chat")
 
     def create_message(
         self,
@@ -85,8 +91,53 @@ class ConversationService:
         self.db.refresh(message)
         return message
 
+    def begin_stream_turn(
+        self,
+        conversation: Conversation,
+        *,
+        user_content: str | None,
+        user_metadata: dict | None,
+        assistant_metadata: dict | None,
+        title: str | None = None,
+    ) -> Message:
+        """Persist a deferred user turn and streaming assistant atomically."""
+        if user_content is not None:
+            self.conversations.create_message(
+                conversation_id=conversation.id,
+                role="user",
+                content=user_content,
+                metadata=user_metadata,
+            )
+        if title:
+            self.conversations.update_title(conversation=conversation, title=title)
+        assistant = self.conversations.create_message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="",
+            metadata=assistant_metadata,
+        )
+        self.db.commit()
+        self.db.refresh(assistant)
+        return assistant
+
     def generate_title(self, message: str) -> str:
-        stop_words = {"a", "an", "the", "for", "my", "me", "and", "or", "to", "in", "of"}
-        words = [word.strip(".,!?").title() for word in message.split() if word.lower().strip(".,!?") not in stop_words]
-        title = " ".join(words[:4]).strip()
-        return title or "New Chat"
+        text = re.sub(r"\s+", " ", message).strip(" .!?\n\t")
+        text = re.sub(
+            r"^(?:(?:hey|hi)\s+ceaser[, ]+)?(?:(?:please|can you|could you|would you)\s+)?"
+            r"(?:help me\s+)?(?:tell me about|tell me|explain|describe|check|show|give me|write|create|build|generate|make)\s+",
+            "",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(r"\b(?:and\s+)?(?:show|list|give me|tell me)\b", " ", text, flags=re.I)
+        text = re.split(r"[.!?\n]", text, maxsplit=1)[0]
+        text = re.sub(r"\b(?:using|with)\s+(?:html|css|javascript|typescript|python)(?:\s*(?:,|and|/|\+)\s*(?:html|css|javascript|typescript|python))*\b.*$", "", text, flags=re.I)
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+#.'-]*", text)
+        filler = {"a", "an", "the", "my", "me", "some", "about", "for", "to", "in", "of", "that", "this", "and"}
+        words = [word for word in words if word.lower() not in filler]
+        if not words:
+            return "New Chat"
+        title = " ".join(words[:6])
+        acronyms = {"ai", "api", "css", "html", "js", "llm", "seo", "sql", "ui", "ux"}
+        title = " ".join(word.upper() if word.lower() in acronyms else word.capitalize() for word in title.split())
+        return title[:72].strip() or "New Chat"

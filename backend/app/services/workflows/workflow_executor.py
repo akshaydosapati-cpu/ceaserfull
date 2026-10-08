@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from sqlalchemy.orm import Session
 
 from app.agents.registry import AgentRegistry
+from app.core.database.execution import run_serial_db
 from app.models.mixins import utc_now
 from app.models.workflow import WorkflowRun, WorkflowStep
 from app.services.audit_service import AuditService
@@ -19,12 +21,13 @@ class WorkflowExecutor:
         self.merger = WorkflowMerger()
         self.capabilities = WorkflowCapabilityExecutor(db)
 
-    def execute_goal_plan(self, *, run: WorkflowRun, plan: GoalWorkflowPlan, confirmed_capability: str | None = None) -> dict:
-        run.status, run.started_at = "running", run.started_at or utc_now()
+    async def execute_goal_plan(self, *, run: WorkflowRun, plan: GoalWorkflowPlan, confirmed_capability: str | None = None) -> dict:
+        await run_serial_db(self._init_goal_plan, run)
         metadata = dict(run.metadata_json or {})
         outputs = dict(metadata.get("outputs") or {})
         plan_steps = {item.step_id: item for item in plan.steps}
         stored_steps = {str(item.metadata_json.get("step_id")): item for item in run.steps}
+
         while True:
             progressed = False
             for planned in plan.steps:
@@ -37,63 +40,103 @@ class WorkflowExecutor:
                 if not all(state == "completed" for state in dependency_states):
                     continue
                 availability = self.capabilities.availability(planned.capability, run.user_id)
-                step.metadata_json = {**step.metadata_json, "availability": availability}
+
                 if availability == "REQUIRES_INTEGRATION":
-                    step.status, run.status = "waiting_for_user", "waiting_for_user"
-                    step.output_summary = f"Connect the required integration for {planned.capability}."
-                    self._persist_goal_state(run, plan, outputs)
+                    await run_serial_db(self._update_step_integration_wait, run, plan, outputs, step, planned)
                     return self._goal_result(run, outputs)
                 if availability == "UNAVAILABLE":
-                    metadata = dict(run.metadata_json or {})
-                    attempted = list(metadata.get("replan_attempts") or [])
-                    if planned.capability not in attempted:
-                        attempted.append(planned.capability)
-                    metadata["replan_attempts"] = attempted[:1]
-                    metadata["replan_exhausted"] = True
-                    run.metadata_json = metadata
-                    step.status = "failed"
-                    step.output_summary = f"Capability unavailable: {planned.capability}"
-                    run.status = "failed"
-                    self._persist_goal_state(run, plan, outputs)
+                    await run_serial_db(self._update_step_unavailable, run, plan, outputs, step, planned)
                     return self._goal_result(run, outputs)
                 if planned.confirmation_required and confirmed_capability != planned.capability:
-                    step.status, run.status = "waiting_for_user", "waiting_for_user"
-                    step.output_summary = f"Confirmation required for {planned.capability}."
-                    metadata["pending_confirmation"] = {"capability": planned.capability, "step_id": planned.step_id}
-                    run.metadata_json = metadata
-                    self._persist_goal_state(run, plan, outputs)
+                    await run_serial_db(self._update_step_confirmation_wait, run, planned)
                     return self._goal_result(run, outputs)
-                step.status, step.started_at = "running", utc_now()
+
                 step_inputs = {name: outputs[name] for name in planned.input_refs if name in outputs}
                 outcome = self.capabilities.execute(planned.capability, user_id=run.user_id, request=plan.goal.original_request, inputs=step_inputs, confirmed=confirmed_capability == planned.capability)
-                step.status = outcome.state.lower()
-                step.output_summary = outcome.message
-                step.metadata_json = {**step.metadata_json, "verified": outcome.verified, "output": outcome.output}
+
                 if outcome.state == "COMPLETED" and outcome.verified and outcome.output is not None:
                     outputs[planned.output_name] = outcome.output
-                    step.completed_at = utc_now()
+                    await run_serial_db(self._update_step_completed, run, plan, outputs, step, planned, outcome)
                     progressed = True
                     continue
-                if outcome.state == "COMPLETED" and not outcome.verified:
-                    step.status = "failed"
-                    step.output_summary = outcome.message or f"{planned.capability} did not return a verified output."
-                    run.status = "failed"
-                else:
-                    run.status = outcome.state.lower()
-                self._persist_goal_state(run, plan, outputs)
+
+                await run_serial_db(self._update_step_failed_or_pending, run, plan, outputs, step, planned, outcome)
                 return self._goal_result(run, outputs)
-            if all(item.status == "completed" for item in run.steps):
-                run.status, run.completed_at = "completed", utc_now()
-                run.result_summary = "All required workflow outputs were verified."
-                metadata.pop("pending_confirmation", None)
-                run.metadata_json = metadata
-                self._persist_goal_state(run, plan, outputs)
+
+            all_completed = await run_serial_db(self._check_all_completed, run)
+            if all_completed:
+                await run_serial_db(self._finalize_workflow_success, run, plan, outputs, metadata)
                 return self._goal_result(run, outputs)
+
             if not progressed:
-                run.status = "failed"
-                run.result_summary = "Workflow stopped because its remaining dependencies could not be resolved."
-                self._persist_goal_state(run, plan, outputs)
+                await run_serial_db(self._finalize_workflow_failed, run, plan, outputs)
                 return self._goal_result(run, outputs)
+
+    def _init_goal_plan(self, run: WorkflowRun) -> None:
+        run.status, run.started_at = "running", run.started_at or utc_now()
+        self.db.flush()
+
+    def _update_step_integration_wait(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict, step: WorkflowStep, planned) -> None:
+        step.status, run.status = "waiting_for_user", "waiting_for_user"
+        step.output_summary = f"Connect the required integration for {planned.capability}."
+        step.metadata_json = {**step.metadata_json, "availability": "REQUIRES_INTEGRATION"}
+        self._persist_goal_state(run, plan, outputs)
+
+    def _update_step_unavailable(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict, step: WorkflowStep, planned) -> None:
+        metadata = dict(run.metadata_json or {})
+        attempted = list(metadata.get("replan_attempts") or [])
+        if planned.capability not in attempted:
+            attempted.append(planned.capability)
+        metadata["replan_attempts"] = attempted[:1]
+        metadata["replan_exhausted"] = True
+        run.metadata_json = metadata
+        step.status = "failed"
+        step.output_summary = f"Capability unavailable: {planned.capability}"
+        step.metadata_json = {**step.metadata_json, "availability": "UNAVAILABLE"}
+        run.status = "failed"
+        self._persist_goal_state(run, plan, outputs)
+
+    def _update_step_confirmation_wait(self, run: WorkflowRun, planned) -> None:
+        metadata = dict(run.metadata_json or {})
+        metadata["pending_confirmation"] = {"capability": planned.capability, "step_id": planned.step_id}
+        run.status = "waiting_for_user"
+        run.metadata_json = metadata
+        self.db.commit()
+        self.db.refresh(run)
+
+    def _update_step_completed(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict, step: WorkflowStep, planned, outcome) -> None:
+        step.status = "completed"
+        step.completed_at = utc_now()
+        step.output_summary = outcome.message
+        step.metadata_json = {**step.metadata_json, "verified": outcome.verified, "output": outcome.output}
+        self._persist_goal_state(run, plan, outputs)
+
+    def _update_step_failed_or_pending(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict, step: WorkflowStep, planned, outcome) -> None:
+        step.status = outcome.state.lower()
+        step.output_summary = outcome.message
+        step.metadata_json = {**step.metadata_json, "verified": outcome.verified, "output": outcome.output}
+        if outcome.state == "COMPLETED" and not outcome.verified:
+            step.status = "failed"
+            step.output_summary = outcome.message or f"{planned.capability} did not return a verified output."
+            run.status = "failed"
+        else:
+            run.status = outcome.state.lower()
+        self._persist_goal_state(run, plan, outputs)
+
+    def _check_all_completed(self, run: WorkflowRun) -> bool:
+        return all(item.status == "completed" for item in run.steps)
+
+    def _finalize_workflow_success(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict, metadata: dict) -> None:
+        run.status, run.completed_at = "completed", utc_now()
+        run.result_summary = "All required workflow outputs were verified."
+        metadata.pop("pending_confirmation", None)
+        run.metadata_json = metadata
+        self._persist_goal_state(run, plan, outputs)
+
+    def _finalize_workflow_failed(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict) -> None:
+        run.status = "failed"
+        run.result_summary = "Workflow stopped because its remaining dependencies could not be resolved."
+        self._persist_goal_state(run, plan, outputs)
 
     def _persist_goal_state(self, run: WorkflowRun, plan: GoalWorkflowPlan, outputs: dict) -> None:
         metadata = dict(run.metadata_json or {})

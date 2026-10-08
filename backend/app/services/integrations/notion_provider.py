@@ -57,19 +57,11 @@ class NotionProvider(BaseIntegrationProvider):
         with httpx.Client(timeout=20) as client:
             user_response = client.get(f"{self.api_base_url}/users/me", headers=headers)
             user_response.raise_for_status()
-            search_response = client.post(
-                f"{self.api_base_url}/search",
-                headers=headers,
-                json={"page_size": 10},
-            )
-            search_response.raise_for_status()
-            users_response = client.get(f"{self.api_base_url}/users", headers=headers, params={"page_size": 25})
-            users_response.raise_for_status()
             user_payload = user_response.json()
-            search_payload = search_response.json()
-            users_payload = users_response.json()
-            items = [self._search_item(client, headers, item) for item in search_payload.get("results", [])]
-            users = [self._user_item(item) for item in users_payload.get("results", [])]
+            search_results = self._paginated_search(client, headers)
+            user_results = self._paginated_users(client, headers)
+            items = [self._search_item(client, headers, item) for item in search_results]
+            users = [self._user_item(item) for item in user_results]
 
         return {
             "provider": self.id,
@@ -118,29 +110,23 @@ class NotionProvider(BaseIntegrationProvider):
         }
 
     def list_tasks(self, integration, query: str | None = None, **_: object) -> dict:
-        metadata = self._cached_or_live_metadata(integration)
+        metadata = self.get_metadata(integration)
         tasks = []
         for database in metadata.get("items") or []:
             if database.get("object") != "database":
                 continue
-            if "task" not in str(database.get("title") or "").lower() and "todo" not in str(database.get("title") or "").lower():
+            if not self._is_task_database(database):
                 continue
             for row in database.get("rows") or []:
                 if isinstance(row, dict):
                     tasks.append(row)
-        if not tasks:
-            metadata = self.get_metadata(integration)
-            for database in metadata.get("items") or []:
-                if database.get("object") != "database":
-                    continue
-                if "task" not in str(database.get("title") or "").lower() and "todo" not in str(database.get("title") or "").lower():
-                    continue
-                for row in database.get("rows") or []:
-                    if isinstance(row, dict):
-                        tasks.append(row)
         if query:
             tasks = self._filter_items(tasks, query)
         return {"workspace": metadata.get("workspace_name"), "tasks": tasks, "users": metadata.get("users") or [], "query": query or ""}
+
+    def list_members(self, integration, **_: object) -> dict:
+        metadata = self.get_metadata(integration)
+        return {"workspace": metadata.get("workspace_name"), "members": metadata.get("users") or []}
 
     def create_task(
         self,
@@ -205,6 +191,42 @@ class NotionProvider(BaseIntegrationProvider):
             if any(term in haystack for term in ("task", "todo", "to-do", "assignee", "assigned", "status", "due")):
                 return database
         return None
+
+    def _is_task_database(self, database: dict) -> bool:
+        haystack = " ".join([str(database.get("title") or ""), " ".join(database.get("properties") or [])]).lower()
+        return any(term in haystack for term in ("task", "todo", "to-do", "assignee", "assigned", "status", "due", "deadline"))
+
+    def _paginated_search(self, client: httpx.Client, headers: dict[str, str]) -> list[dict]:
+        results: list[dict] = []
+        cursor = None
+        while len(results) < 100:
+            payload = {"page_size": 100}
+            if cursor:
+                payload["start_cursor"] = cursor
+            response = client.post(f"{self.api_base_url}/search", headers=headers, json=payload)
+            response.raise_for_status()
+            page = response.json()
+            results.extend(page.get("results") or [])
+            cursor = page.get("next_cursor")
+            if not page.get("has_more") or not cursor:
+                break
+        return results[:100]
+
+    def _paginated_users(self, client: httpx.Client, headers: dict[str, str]) -> list[dict]:
+        results: list[dict] = []
+        cursor = None
+        while len(results) < 100:
+            params = {"page_size": 100}
+            if cursor:
+                params["start_cursor"] = cursor
+            response = client.get(f"{self.api_base_url}/users", headers=headers, params=params)
+            response.raise_for_status()
+            page = response.json()
+            results.extend(page.get("results") or [])
+            cursor = page.get("next_cursor")
+            if not page.get("has_more") or not cursor:
+                break
+        return results[:100]
 
     def _database_schema(self, integration, database_id: str | None) -> dict:
         if not database_id:
@@ -382,7 +404,7 @@ class NotionProvider(BaseIntegrationProvider):
             response = client.post(
                 f"{self.api_base_url}/databases/{database_id}/query",
                 headers=headers,
-                json={"page_size": 12},
+                json={"page_size": 100},
             )
             if response.status_code >= 400:
                 return []

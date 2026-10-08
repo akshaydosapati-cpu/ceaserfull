@@ -8,6 +8,7 @@ from app.intelligence.ai.model_router.models import ModelDefinition, Workload
 
 
 logger = logging.getLogger(__name__)
+_UNAVAILABLE_HUGGINGFACE_MODELS = frozenset({"deepseek-ai/deepseek-coder-v2-lite-instruct"})
 
 
 class ModelRegistry:
@@ -130,6 +131,9 @@ def configured_huggingface_models(disabled: set[str], priorities: dict[str, int]
         profile = _huggingface_profile(normalized_name, index=index, priorities=priorities)
         model_id = "huggingface-primary" if index == 0 else f"huggingface-{_slugify(normalized_name)}"
         enabled = model_id not in disabled
+        provider_supported = normalized_name.lower() not in _UNAVAILABLE_HUGGINGFACE_MODELS
+        if not provider_supported:
+            logger.warning("llm_model_unavailable provider=huggingface model=%s", normalized_name)
         models.append(
             ModelDefinition(
                 model_id=model_id,
@@ -137,7 +141,7 @@ def configured_huggingface_models(disabled: set[str], priorities: dict[str, int]
                 provider_model_name=normalized_name,
                 display_name=profile[0],
                 enabled=enabled,
-                available=bool(settings.huggingface_api_key),
+                available=bool(settings.huggingface_api_key) and provider_supported,
                 capabilities=profile[1],
                 allowed_workloads=profile[2],
                 context_window=profile[3],

@@ -2,6 +2,7 @@ from app.models.agent import Agent, AgentModule
 from app.models.admin import DownloadEvent
 from app.models.audit_log import AuditLog
 from app.models.automation import Automation, AutomationRun, AutomationTemplate
+from app.models.certificate import Certificate, CertificateDocument
 from app.models.commercial import (
     BillingEvent,
     BillingInvoice,
@@ -48,6 +49,8 @@ __all__ = [
     "Automation",
     "AutomationRun",
     "AutomationTemplate",
+    "Certificate",
+    "CertificateDocument",
     "BillingEvent",
     "BillingInvoice",
     "BillingPayment",

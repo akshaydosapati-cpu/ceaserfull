@@ -1,3 +1,6 @@
+from datetime import timedelta
+from urllib.parse import quote
+
 from app.services.integrations.base_provider import BaseIntegrationProvider
 from app.core.config.settings import settings
 from app.models.integration import Integration
@@ -23,36 +26,60 @@ class GoogleCalendarProvider(BaseIntegrationProvider):
         calendars_payload = self.google_get(
             integration,
             "https://www.googleapis.com/calendar/v3/users/me/calendarList",
-            {"maxResults": 10, "minAccessRole": "reader"},
+            {"maxResults": 250, "minAccessRole": "reader", "showHidden": "false"},
         )
-        events_payload = self.google_get(
-            integration,
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            {
-                "singleEvents": "true",
-                "orderBy": "startTime",
-                "timeMin": utc_now().isoformat(),
-                "maxResults": 10,
-            },
-        )
-        events = [
-            {
-                "id": item.get("id"),
-                "title": item.get("summary", "Untitled event"),
-                "start": item.get("start", {}).get("dateTime") or item.get("start", {}).get("date"),
-                "end": item.get("end", {}).get("dateTime") or item.get("end", {}).get("date"),
-                "location": item.get("location"),
-                "link": item.get("htmlLink"),
-            }
-            for item in events_payload.get("items", [])
-        ]
+        calendars = calendars_payload.get("items", [])
+        now = utc_now()
+        events: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        for calendar in calendars:
+            calendar_id = calendar.get("id")
+            if not calendar_id or calendar.get("deleted") or calendar.get("hidden"):
+                continue
+            events_payload = self.google_get(
+                integration,
+                f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
+                {
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "timeMin": now.isoformat(),
+                    "timeMax": (now + timedelta(days=366)).isoformat(),
+                    "maxResults": 50,
+                },
+            )
+            calendar_name = calendar.get("summaryOverride") or calendar.get("summary") or "Calendar"
+            for item in events_payload.get("items", []):
+                if item.get("status") == "cancelled":
+                    continue
+                start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+                title = item.get("summary", "Untitled event")
+                identity = (str(calendar_id), str(item.get("id") or title), str(start or ""))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                events.append(
+                    {
+                        "id": item.get("id"),
+                        "title": title,
+                        "start": start,
+                        "end": item.get("end", {}).get("dateTime") or item.get("end", {}).get("date"),
+                        "all_day": bool(item.get("start", {}).get("date")),
+                        "location": item.get("location"),
+                        "link": item.get("htmlLink"),
+                        "calendar_id": calendar_id,
+                        "calendar_name": calendar_name,
+                        "calendar_primary": bool(calendar.get("primary")),
+                    }
+                )
+        events.sort(key=lambda item: str(item.get("start") or ""))
+        events = events[:100]
         return {
             "provider": self.id,
             "status": integration.status,
             "account_email": integration.provider_email,
             "permissions": self.permissions,
             "summary": {
-                "calendar_count": len(calendars_payload.get("items", [])),
+                "calendar_count": len(calendars),
                 "upcoming_events": len(events),
             },
             "items": events,

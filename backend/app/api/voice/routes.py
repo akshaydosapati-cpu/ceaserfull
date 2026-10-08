@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.access_control import require_conversation_access
 from app.core.security.dependencies import get_current_user
 from app.models.user import User
@@ -22,20 +23,24 @@ from app.services.audit_service import AuditService
 from app.services.voice.voice_manager import VoiceManager
 from app.services.voice.voice_session import VoiceSessionManager
 from app.services.voice.voice_settings import VoiceSettingsService
+from app.api.voice.elevenlabs_routes import router as elevenlabs_router
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+# Include ElevenLabs streaming router
+router.include_router(elevenlabs_router)
 
 
 @router.post("/transcribe", response_model=VoiceTranscribeResponse)
 async def transcribe_voice(user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)], audio: UploadFile = File(...), language: str | None = None):
-    settings = VoiceSettingsService(db).get_or_create(user.id)
+    settings = await run_serial_db(VoiceSettingsService(db).get_or_create, user.id)
     content = await audio.read()
     try:
         transcript = VoiceManager(db).transcribe(content, content_type=audio.content_type or "audio/webm", language=language or settings.language)
-        AuditService(db).record(user_id=user.id, action="voice_transcribed", resource_type="voice", metadata={"bytes": len(content)})
+        await run_serial_db(AuditService(db).record, user_id=user.id, action="voice_transcribed", resource_type="voice", metadata={"bytes": len(content)})
         return {"transcript": transcript}
     except Exception as exc:
-        AuditService(db).record(user_id=user.id, action="voice_failed", resource_type="voice", metadata={"stage": "transcribe", "error": str(exc)})
+        await run_serial_db(AuditService(db).record, user_id=user.id, action="voice_failed", resource_type="voice", metadata={"stage": "transcribe", "error": str(exc)})
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
@@ -49,20 +54,21 @@ async def respond_with_voice(
     if conversation_id:
         require_conversation_access(db, user, conversation_id)
     content = await audio.read()
-    AuditService(db).record(user_id=user.id, action="voice_started", resource_type="voice", resource_id=conversation_id)
+    await run_serial_db(AuditService(db).record, user_id=user.id, action="voice_started", resource_type="voice", resource_id=conversation_id)
     try:
-        result = VoiceManager(db).respond(user_id=user.id, audio=content, content_type=audio.content_type or "audio/webm", conversation_id=conversation_id)
-        AuditService(db).record(
+        result = await run_serial_db(VoiceManager(db).respond, user_id=user.id, audio=content, content_type=audio.content_type or "audio/webm", conversation_id=conversation_id)
+        await run_serial_db(
+            AuditService(db).record,
             user_id=user.id,
             action="voice_response_generated",
             resource_type="voice",
             resource_id=result.session_id,
             metadata={"conversation_id": result.chat.conversation_id, "transcript_length": len(result.transcript)},
         )
-        AuditService(db).record(user_id=user.id, action="voice_completed", resource_type="voice", resource_id=result.session_id)
+        await run_serial_db(AuditService(db).record, user_id=user.id, action="voice_completed", resource_type="voice", resource_id=result.session_id)
         return result
     except Exception as exc:
-        AuditService(db).record(user_id=user.id, action="voice_failed", resource_type="voice", metadata={"stage": "respond", "error": str(exc)})
+        await run_serial_db(AuditService(db).record, user_id=user.id, action="voice_failed", resource_type="voice", metadata={"stage": "respond", "error": str(exc)})
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

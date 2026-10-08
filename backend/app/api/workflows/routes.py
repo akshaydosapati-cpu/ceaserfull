@@ -29,7 +29,7 @@ def workflow_templates(user: Annotated[User, Depends(get_current_user)], db: Ann
 
 
 @router.post("/start", response_model=WorkflowStartResponse)
-def start_workflow(payload: WorkflowStartRequest, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
+async def start_workflow(payload: WorkflowStartRequest, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
     request_id = f"workflow:{uuid4().hex}"
     credits = CreditService(db)
     try:
@@ -38,7 +38,7 @@ def start_workflow(payload: WorkflowStartRequest, user: Annotated[User, Depends(
         overview = credits.overview(user.id)
         raise HTTPException(status_code=402, detail={"code": "insufficient_credits", "message": "You're out of CEASER credits.", "renewal_date": str(overview["renewal_date"]), "actions": ["buy_credits", "upgrade", "refer_and_earn"]}) from exc
     try:
-        result = WorkflowOrchestrator(db).run(user_id=user.id, message=payload.message, conversation_id=payload.conversation_id, file_ids=payload.file_ids)
+        result = await WorkflowOrchestrator(db).run(user_id=user.id, message=payload.message, conversation_id=payload.conversation_id, file_ids=payload.file_ids)
         payload_result = result.model_dump()
         meaningful = bool(payload_result.get("result_summary") or payload_result.get("final_response"))
         credits.settle(user.id, request_id, charge.estimated_credits, meaningful_output=meaningful)
@@ -80,9 +80,10 @@ def cancel_workflow(workflow_id: str, user: Annotated[User, Depends(get_current_
 
 
 @router.post("/{workflow_id}/confirm", response_model=WorkflowStartResponse)
-def confirm_goal_workflow(workflow_id: str, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
+async def confirm_goal_workflow(workflow_id: str, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
     try:
-        return WorkflowOrchestrator(db).resume_goal(user_id=user.id, workflow_id=workflow_id, confirmed=True).model_dump()
+        result = await WorkflowOrchestrator(db).resume_goal(user_id=user.id, workflow_id=workflow_id, confirmed=True)
+        return result.model_dump()
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -99,7 +100,7 @@ def transition_workflow(workflow_id: str, action: str, user: Annotated[User, Dep
 
 
 @router.post("/{workflow_id}/regenerate", response_model=WorkflowStartResponse)
-def regenerate_workflow(workflow_id: str, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
+async def regenerate_workflow(workflow_id: str, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
     run = WorkflowManager(db).get(workflow_id=workflow_id, user_id=user.id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -107,7 +108,8 @@ def regenerate_workflow(workflow_id: str, user: Annotated[User, Depends(get_curr
     message = metadata.get("message")
     if not isinstance(message, str) or not message.strip():
         raise HTTPException(status_code=400, detail="This older workflow cannot be regenerated because its original brief is unavailable.")
-    return WorkflowOrchestrator(db).run(user_id=user.id, message=message, conversation_id=metadata.get("conversation_id"), file_ids=metadata.get("file_ids") or []).model_dump()
+    result = await WorkflowOrchestrator(db).run(user_id=user.id, message=message, conversation_id=metadata.get("conversation_id"), file_ids=metadata.get("file_ids") or [])
+    return result.model_dump()
 
 
 @router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -4,6 +4,7 @@
   "cleanUrls": false,
   "trailingSlash": true,
   "rewrites": [
-    { "source": "/r/:code", "destination": "/console/r/?code=:code" }
+    { "source": "/r/:code", "destination": "/console/r/?code=:code" },
+    { "source": "/verify/:certificateId", "destination": "/verify/?certificateId=:certificateId" }
   ]
 }

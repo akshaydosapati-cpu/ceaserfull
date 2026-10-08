@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config.settings import settings
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.dependencies import get_current_user
 from app.intelligence.ai.ai_provider_service import ai_provider_service
 from app.intelligence.knowledge.context_builder import context_builder
@@ -39,7 +40,8 @@ def list_sources(user: Annotated[User, Depends(get_current_user)], db: Annotated
 
 @router.post("/ingest/text", response_model=KnowledgeSourceRead, status_code=status.HTTP_201_CREATED)
 async def ingest_text(payload: KnowledgeIngestTextRequest, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
-    source = KnowledgeRepository(db).ingest_text(
+    source = await run_serial_db(
+        KnowledgeRepository(db).ingest_text,
         user_id=user.id,
         title=payload.title,
         content=payload.content,
@@ -50,8 +52,8 @@ async def ingest_text(payload: KnowledgeIngestTextRequest, user: Annotated[User,
     )
     if settings.knowledge_auto_embed:
         await KnowledgeEmbeddingService(db).embed_source(user_id=user.id, source_id=source.id)
-    db.commit()
-    db.refresh(source)
+    await run_serial_db(db.commit)
+    await run_serial_db(db.refresh, source)
     return source
 
 
@@ -66,7 +68,8 @@ async def search(payload: KnowledgeSearchRequest, user: Annotated[User, Depends(
         source_id=payload.source_id,
         limit=payload.limit,
     )
-    repo.log_retrieval(
+    await run_serial_db(
+        repo.log_retrieval,
         user_id=user.id,
         intent="manual_search",
         provider_names=["documents"],
@@ -74,7 +77,7 @@ async def search(payload: KnowledgeSearchRequest, user: Annotated[User, Depends(
         source_ids=list({chunk.source_id for chunk in chunks}),
         latency_ms=round((perf_counter() - started) * 1000),
     )
-    db.commit()
+    await run_serial_db(db.commit)
     return KnowledgeSearchResponse(
         items=[
             KnowledgeChunkRead(
@@ -109,7 +112,7 @@ async def build_context(payload: ContextBuildRequest, user: Annotated[User, Depe
         provider.limit = payload.limit
     items = await KnowledgeEngine(db).retrieve(request=request, plan=plan)
     context = context_builder.build(request=request, items=items)
-    db.commit()
+    await run_serial_db(db.commit)
     return ContextBuildResponse(
         intent=intent.value,
         output_format=plan.output_format,
@@ -132,7 +135,7 @@ async def build_context(payload: ContextBuildRequest, user: Annotated[User, Depe
 @router.post("/sources/{source_id}/embed")
 async def embed_source(source_id: str, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
     embedded_count = await KnowledgeEmbeddingService(db).embed_source(user_id=user.id, source_id=source_id)
-    db.commit()
+    await run_serial_db(db.commit)
     return {"source_id": source_id, "embedded_chunks": embedded_count}
 
 
@@ -191,5 +194,5 @@ async def orchestrate(payload: ContextBuildRequest, user: Annotated[User, Depend
         interaction_mode=payload.interaction_mode,
     )
     result = await RequestOrchestrator(db).handle(request)
-    db.commit()
+    await run_serial_db(db.commit)
     return result

@@ -1,4 +1,6 @@
 import asyncio
+import anyio
+import httpx
 import logging
 import uuid
 from typing import Annotated, Literal
@@ -7,16 +9,19 @@ import json
 from collections.abc import AsyncIterator
 from time import perf_counter
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from app.core.rate_limiter import rate_limiter
+from app.core.stream_diagnostics import stream_diagnostics
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.database.session import SessionLocal, get_db
+from app.core.database.session import SessionLocal, database_timing, get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.dependencies import get_current_user
 from app.intelligence.ai.model_router import request_for_chat
 from app.intelligence.ai.sync import generate_text_sync, stream_text
+from app.intelligence.ai.errors import AIServiceUnavailableError
 from app.models.user import User
 from app.schemas.ceaser import CeaserChatRequest, CeaserChatResponse
 from app.services.audit_service import AuditService
@@ -24,10 +29,11 @@ from app.services.background_task_service import background_task_store
 from app.services.conversation_service import ConversationService
 from app.services.orchestrator import CeaserOrchestrator
 from app.services.rich_response_service import RichResponseService
-from app.services.credit_service import CreditService, InsufficientCreditsError
+from app.services.credit_service import CreditService, InsufficientCreditsError, ReservationConflictError
 
 router = APIRouter(prefix="/ceaser", tags=["ceaser"])
 logger = logging.getLogger(__name__)
+_autocomplete_client = httpx.AsyncClient(timeout=httpx.Timeout(2.5, connect=1.0))
 
 
 class CeaserDemoTurn(BaseModel):
@@ -44,6 +50,26 @@ class CeaserDemoResponse(BaseModel):
     response: str
     source: str = "live_backend"
     continuation_count: int = 0
+
+
+@router.get("/chat/autocomplete")
+async def ceaser_chat_autocomplete(
+    _: Annotated[User, Depends(get_current_user)],
+    query: str = Query(min_length=2, max_length=200),
+):
+    """Return live query completions without invoking the chat pipeline."""
+    try:
+        response = await _autocomplete_client.get(
+            "https://suggestqueries.google.com/complete/search",
+            params={"client": "firefox", "q": query, "hl": "en"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        suggestions = payload[1] if isinstance(payload, list) and len(payload) > 1 and isinstance(payload[1], list) else []
+        return {"suggestions": [str(item).strip() for item in suggestions if str(item).strip()][:5]}
+    except (httpx.HTTPError, ValueError, TypeError):
+        logger.info("chat_autocomplete_unavailable query_chars=%s", len(query))
+        return {"suggestions": []}
 
 
 @router.post("/demo", response_model=CeaserDemoResponse)
@@ -132,6 +158,14 @@ def ceaser_chat(payload: CeaserChatRequest, user: Annotated[User, Depends(get_cu
         db.rollback()
         credits.release(user_id, billing_id)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AIServiceUnavailableError as exc:
+        db.rollback()
+        credits.release(user_id, billing_id)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ai_capacity_busy", "message": "CEASER is handling unusually high AI demand. Please try again in a moment."},
+            headers={"Retry-After": "5"},
+        ) from exc
     except Exception:
         db.rollback()
         credits.release(user_id, billing_id)
@@ -164,11 +198,16 @@ def _maybe_desktop_fast_response(payload: CeaserChatRequest) -> dict | None:
         "Do not mention backend, providers, sources, or implementation. "
         "Maximum 180 words."
     )
+    trace: dict[str, object] = {}
     response = generate_text_sync(
         instructions=instructions,
         input_text=message,
         temperature=0.35,
-        max_output_tokens=360,
+        max_output_tokens=300,
+        model_request=request_for_chat(context_size_estimate=max(1, len(message) // 4)),
+        attempt_timeout_seconds=5.0,
+        overall_timeout_seconds=12.0,
+        trace=trace,
     ).strip()
     elapsed_ms = round((perf_counter() - started) * 1000, 2)
     logger.info(
@@ -193,6 +232,10 @@ def _maybe_desktop_fast_response(payload: CeaserChatRequest) -> dict | None:
             "retrieval_time_ms": 0,
             "context_build_ms": 0,
             "backend_fast_path_ms": elapsed_ms,
+            "provider": trace.get("provider"),
+            "model": trace.get("model"),
+            "fallback_used": bool(trace.get("fallback_used")),
+            "provider_first_token_ms": trace.get("first_token_ms"),
             "cache_hit": True,
         },
         "suggestions": [],
@@ -271,7 +314,7 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
     message = payload.message
     conversation_id = payload.conversation_id
     file_ids = list(payload.file_ids)
-    request_id = str(uuid.uuid4())
+    request_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
     billing_id = f"chat:{payload.request_id or request_id}"
     auth_trace = getattr(request.state, "ceaser_auth_trace", {})
     rate_started = perf_counter()
@@ -293,36 +336,80 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
             headers={"Retry-After": str(concurrency_limit.retry_after)},
         )
     credits = CreditService(db)
+    conversation = None
+    reservation_owned = False
+
+    def reserve_credit():
+        nonlocal reservation_owned
+        result = credits.reserve(user_id, billing_id, "ai_conversation", allow_existing=False)
+        reservation_owned = True
+        return result
+
+    def cleanup_before_stream():
+        db.rollback()
+        if reservation_owned:
+            credits.release(user_id, billing_id)
+
     try:
+        db_count_before, db_ms_before = database_timing()
+        # The reservation already requires a durable transaction. Flush a new
+        # conversation first so both records are committed in that transaction.
+        if not conversation_id:
+            conversation_started = perf_counter()
+            conversation = await run_serial_db(ConversationService(db).create_pending, user_id=user_id)
+            conversation_id = conversation.id
+            conversation_lookup_ms = round((perf_counter() - conversation_started) * 1000, 2)
+        else:
+            conversation_lookup_ms = 0.0
         reserve_started = perf_counter()
-        reservation = credits.reserve(user.id, billing_id, "ai_conversation")
+        reservation = await run_serial_db(reserve_credit)
         credit_reservation_ms = round((perf_counter() - reserve_started) * 1000, 2)
-        logger.info("ceaser_stream_stage request_id=%s stage=credits_reserved duration_ms=%.2f", request_id, credit_reservation_ms)
+        db_count_after, db_ms_after = database_timing()
+        logger.info(
+            "ceaser_stream_stage request_id=%s stage=credits_reserved duration_ms=%.2f db_queries=%s db_ms=%.2f",
+            request_id, credit_reservation_ms,
+            max(0, db_count_after - db_count_before), max(0.0, db_ms_after - db_ms_before),
+        )
+    except asyncio.CancelledError:
+        try:
+            with anyio.CancelScope(shield=True):
+                await run_serial_db(cleanup_before_stream)
+        finally:
+            rate_limiter.release("chat-generation", user_id)
+        raise
+    except ReservationConflictError as exc:
+        try:
+            with anyio.CancelScope(shield=True):
+                await run_serial_db(cleanup_before_stream)
+        finally:
+            rate_limiter.release("chat-generation", user_id)
+        raise HTTPException(status_code=409, detail={"code": "request_id_conflict", "message": str(exc)}) from exc
     except InsufficientCreditsError as exc:
         rate_limiter.release("chat-generation", user_id)
         raise HTTPException(status_code=402, detail="Insufficient CEASER credits.") from exc
     except Exception:
-        rate_limiter.release("chat-generation", user_id)
+        try:
+            with anyio.CancelScope(shield=True):
+                await run_serial_db(cleanup_before_stream)
+        finally:
+            rate_limiter.release("chat-generation", user_id)
         raise
     # Keep only immutable primitives across the async SSE lifetime. The ORM
     # reservation is committed/refreshed here and must not be dereferenced
     # after the request session has expired or been detached.
     try:
-        reservation_estimated_credits = int(reservation.estimated_credits)
+        snapshot_started = perf_counter()
+        reservation_estimated_credits = await run_serial_db(lambda: int(reservation.estimated_credits))
+        reservation_snapshot_ms = round((perf_counter() - snapshot_started) * 1000, 2)
         # A new chat is created authoritatively inside the stream request. This
         # removes the frontend's blocking create-conversation round trip while
         # preserving one durable conversation and the existing ownership checks.
-        if not conversation_id:
-            conversation_started = perf_counter()
-            conversation_id = ConversationService(db).create(user_id=user.id).id
-            conversation_lookup_ms = round((perf_counter() - conversation_started) * 1000, 2)
+        if conversation is not None:
             logger.info("ceaser_stream_stage request_id=%s stage=conversation_created duration_ms=%.2f", request_id, conversation_lookup_ms)
-        else:
-            conversation_lookup_ms = 0.0
-    except Exception:
-        db.rollback()
+    except (Exception, asyncio.CancelledError):
         try:
-            credits.release(user_id, billing_id)
+            with anyio.CancelScope(shield=True):
+                await run_serial_db(cleanup_before_stream)
         finally:
             rate_limiter.release("chat-generation", user_id)
         raise
@@ -340,29 +427,68 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
         return f"event: {event_type}\ndata: {payload_text}\n\n"
 
     async def stream() -> AsyncIterator[str]:
+        # FastAPI releases request-scoped dependencies once the streaming
+        # response starts. Keep all ORM work inside a session owned by the SSE
+        # generator so models cannot become detached mid-stream.
+        stream_db = SessionLocal()
+        stream_credits = CreditService(stream_db)
         started = request_received
         stage_marks: dict[str, float] = {"start": started}
         trace: dict[str, object] = {
             "request_id": request_id,
             "auth_total_ms": auth_trace.get("total_ms"),
+            "route_entry_ms": round((route_entered - request_received) * 1000, 2),
+            "pre_stream_ms": round((perf_counter() - request_received) * 1000, 2),
             "auth_remote_ms": auth_trace.get("remote_ms"),
             "auth_db_validation_ms": auth_trace.get("db_validation_ms"),
+            "auth_db_query_ms": auth_trace.get("db_query_ms"),
             "rate_check_ms": rate_check_ms,
             "concurrency_check_ms": concurrency_check_ms,
             "credit_reservation_ms": credit_reservation_ms,
             "conversation_create_ms": conversation_lookup_ms,
+            "reservation_snapshot_ms": reservation_snapshot_ms,
         }
         first_sse_token_logged = False
         completed_meaningfully = False
+        prepared = None
+        chunks: list[str] = []
+        orchestrator = None
+
+        def finalize_response(text, assistant_message=None):
+            nonlocal completed_meaningfully
+            result = orchestrator.finalize_stream_response(prepared, text, assistant_message=assistant_message)
+            completed_meaningfully = bool(result.get("response"))
+            return result
+
+        def cleanup_stream():
+            try:
+                if not completed_meaningfully and prepared is not None:
+                    try:
+                        stream_db.rollback()
+                        orchestrator.interrupt_stream_response(prepared, "".join(chunks))
+                    except Exception:
+                        stream_db.rollback()
+                        logger.exception("ceaser_stream_interruption_persistence_failed request_id=%s", request_id)
+                if completed_meaningfully:
+                    stream_credits.settle(user_id, billing_id, reservation_estimated_credits, meaningful_output=True)
+                else:
+                    stream_db.rollback()
+                    stream_credits.release(user_id, billing_id)
+            except Exception:
+                stream_db.rollback()
+                logger.exception("ceaser_stream_settlement_failed request_id=%s billing_id=%s", request_id, billing_id)
+            finally:
+                stream_db.close()
+
         try:
             yield event("response.started", {"id": request_id, "status": "streaming", "conversation_id": conversation_id})
-            orchestrator = CeaserOrchestrator(db)
+            orchestrator = await run_serial_db(CeaserOrchestrator, stream_db)
             trace["agent_started_ms"] = round((perf_counter() - started) * 1000, 2)
             logger.info("ceaser_latency request_id=%s agent_started_ms=%s", request_id, trace["agent_started_ms"])
             logger.info("ceaser_stream_stage request_id=%s stage=retrieval_started", request_id)
             prepare_started = perf_counter()
-            prepared = await asyncio.to_thread(
-                orchestrator.prepare_stream_request,
+            trace["prepare_started_ms"] = round((prepare_started - started) * 1000, 2)
+            prepared = await orchestrator.prepare_stream_request(
                 user_id=user_id,
                 message=message,
                 conversation_id=conversation_id,
@@ -373,12 +499,20 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
                 force_live_web_search=payload.force_live_web_search,
             )
             stage_marks["prepared"] = perf_counter()
+            trace["prepare_completed_ms"] = round((stage_marks["prepared"] - started) * 1000, 2)
             trace["prepare_stream_request_ms"] = round((stage_marks["prepared"] - prepare_started) * 1000, 2)
             trace["prepare_stage_timings"] = prepared.get("observability", {}).get("stage_timings", [])
+            trace["prepare_worker_ms"] = prepared.get("observability", {}).get("prepare_ms")
+            trace["prepare_logging_ms"] = prepared.get("observability", {}).get("prepare_logging_ms")
+            trace["prepare_unattributed_ms"] = prepared.get("observability", {}).get("prepare_unattributed_ms")
             trace["retrieval_time_ms"] = prepared.get("observability", {}).get("retrieval_time_ms")
             trace["routing_ms"] = prepared.get("observability", {}).get("routing_ms")
             trace["tool_calls_ms"] = prepared.get("observability", {}).get("tool_calls_ms")
             trace["web_search_requested"] = prepared.get("observability", {}).get("web_search_requested")
+            trace["search_ms"] = prepared.get("observability", {}).get("search_ms")
+            trace["extraction_ms"] = prepared.get("observability", {}).get("extraction_ms")
+            trace["research_assembly_ms"] = prepared.get("observability", {}).get("research_assembly_ms")
+            trace["research_total_ms"] = prepared.get("observability", {}).get("research_total_ms")
             trace["internal_context_found"] = prepared.get("observability", {}).get("internal_context_found")
             trace["memory_match_count"] = prepared.get("observability", {}).get("memory_match_count")
             trace["context_build_ms"] = prepared.get("observability", {}).get("retrieval_time_ms")
@@ -393,13 +527,16 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
                 prepared.get("observability", {}).get("retrieval_time_ms"),
             )
             logger.info(
-                "ceaser_stream_stage request_id=%s stage=context_complete context_tokens=%s prepare_ms=%s routing_ms=%s tool_calls_ms=%s web_search_requested=%s internal_context_found=%s memory_match_count=%s context_mode=%s retrieval_scope=%s retrieval_sources=%s",
+                "ceaser_stream_stage request_id=%s stage=context_complete context_tokens=%s prepare_ms=%s routing_ms=%s tool_calls_ms=%s web_search_requested=%s search_ms=%s extraction_ms=%s research_assembly_ms=%s internal_context_found=%s memory_match_count=%s context_mode=%s retrieval_scope=%s retrieval_sources=%s",
                 request_id,
                 prepared.get("observability", {}).get("context_tokens"),
                 prepared.get("observability", {}).get("prepare_ms"),
                 trace.get("routing_ms"),
                 trace.get("tool_calls_ms"),
                 trace.get("web_search_requested"),
+                trace.get("search_ms"),
+                trace.get("extraction_ms"),
+                trace.get("research_assembly_ms"),
                 trace.get("internal_context_found"),
                 trace.get("memory_match_count"),
                 prepared.get("observability", {}).get("context_mode"),
@@ -419,7 +556,7 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
                     trace["endpoint_ttft_ms"],
                 )
                 prepared["stream_trace"] = trace
-                response = orchestrator.finalize_stream_response(prepared, prepared["response"])
+                response = await run_serial_db(finalize_response, prepared["response"])
                 rich = RichResponseService.compose(response,user_id=user_id,task_id=request_id).model_dump(mode="json")
                 response["rich_response"] = rich
                 for block in rich["blocks"]: yield event("block.created", block)
@@ -454,8 +591,18 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
                 chunks.append(chunk)
                 response_so_far = "".join(chunks)
                 if not first_sse_token_logged:
+                    # Capture TTFT timestamps before anything else so the
+                    # measurement is not inflated by logging or serialization.
                     token_received_at = perf_counter()
                     trace["endpoint_ttft_ms"] = round((perf_counter() - started) * 1000, 2)
+                    first_sse_token_logged = True
+                    # Yield the first token immediately — nothing must come
+                    # between the provider delivering the first chunk and the
+                    # client receiving it. All logging and diagnostics follow.
+                    yield event("token", chunk)
+                    trace["first_token_forwarding_ms"] = round((perf_counter() - token_received_at) * 1000, 2)
+                    # Post-yield: log the full TTFT breakdown. These calls are
+                    # now safely after the token is on the wire.
                     logger.info("ceaser_latency request_id=%s first_token_ms=%s", request_id, trace["endpoint_ttft_ms"])
                     logger.info(
                         "ceaser_stream_stage request_id=%s stage=first_sse_token endpoint_ttft_ms=%s",
@@ -475,25 +622,29 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
                         request_id,
                         json.dumps(trace.get("prepare_stage_timings", []), ensure_ascii=True, separators=(",", ":")),
                     )
-                    first_sse_token_logged = True
-                    yield event("token", chunk)
-                    trace["first_token_forwarding_ms"] = round((perf_counter() - token_received_at) * 1000, 2)
+                    db_queries, db_ms = database_timing()
+                    yield event("diagnostics", stream_diagnostics(trace, request_id=request_id,
+                        stage="first_content_forwarded", elapsed_ms=(perf_counter() - started) * 1000,
+                        db_queries=db_queries, db_ms=db_ms))
                     # Durability begins only after the first chunk has been
                     # forwarded. A database commit must never delay user TTFT.
-                    assistant_message = orchestrator.begin_stream_response(prepared)
+                    assistant_message = await run_serial_db(orchestrator.begin_stream_response, prepared)
                     if assistant_message:
-                        orchestrator.persist_stream_response(assistant_message, response_so_far)
+                        await run_serial_db(orchestrator.persist_stream_response, assistant_message, response_so_far)
                         persisted_length = len(response_so_far)
                     continue
                 if assistant_message and len(response_so_far) - persisted_length >= 360:
-                    orchestrator.persist_stream_response(assistant_message, response_so_far)
+                    await run_serial_db(orchestrator.persist_stream_response, assistant_message, response_so_far)
                     persisted_length = len(response_so_far)
                 yield event("token", chunk)
             response_text = "".join(chunks).strip()
             trace["output_tokens"] = max(1, round(len(response_text) / 4)) if response_text else 0
             trace["total_time_ms"] = round((perf_counter() - started) * 1000, 2)
             prepared["stream_trace"] = trace
-            response = orchestrator.finalize_stream_response(prepared, response_text, assistant_message=assistant_message)
+            persistence_started = perf_counter()
+            response = await run_serial_db(finalize_response, response_text, assistant_message=assistant_message)
+            trace["persistence_ms"] = round((perf_counter() - persistence_started) * 1000, 2)
+            logger.info("ceaser_stream_stage request_id=%s stage=persistence_complete persistence_ms=%s elapsed_ms=%.2f", request_id, trace["persistence_ms"], (perf_counter() - started) * 1000)
             if trace.get("structural_completion_blocked"):
                 response["status"] = "partial"
                 response["completion_warning"] = "The code artifact needs continuation before it is complete."
@@ -552,7 +703,7 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
                 trace.get("provider_generation_ms"),
                 trace.get("output_tokens"),
             )
-            AuditService(db).record(
+            await run_serial_db(AuditService(stream_db).record,
                 user_id=user_id,
                 action="message_created",
                 resource_type="conversation",
@@ -563,28 +714,24 @@ async def ceaser_chat_stream(request: Request, payload: CeaserChatRequest, user:
             yield event("activity", rich["activity"][0])
             yield event("response.completed", rich)
             yield event("complete", response)
+            db_queries, db_ms = database_timing()
+            yield event("diagnostics", stream_diagnostics(trace, request_id=request_id,
+                stage="response_completed", elapsed_ms=(perf_counter() - started) * 1000,
+                db_queries=db_queries, db_ms=db_ms))
             completed_meaningfully = bool(response.get("response"))
             logger.info("ceaser_stream_stage request_id=%s stage=request_complete total_ms=%s", request_id, trace.get("total_time_ms"))
         except ValueError as exc:
             yield event("response.failed", {"id": request_id, "status": "failed", "error": {"category": "validation", "message": str(exc), "retryable": False}})
             yield event("error", {"message": str(exc)})
         except Exception:
-            db.rollback()
+            await run_serial_db(stream_db.rollback)
             logger.exception("ceaser_chat_stream_failed user_id=%s conversation_id=%s", user_id, conversation_id)
             yield event("response.failed", {"id": request_id, "status": "failed", "error": {"category": "internal", "message": "We couldn't complete your request. Please try again.", "retryable": True}})
             yield event("error", {"message": "We couldn't complete your request. Please try again."})
         finally:
             try:
-                if completed_meaningfully:
-                    credits.settle(user_id, billing_id, reservation_estimated_credits, meaningful_output=True)
-                else:
-                    db.rollback()
-                    credits.release(user_id, billing_id)
-            except Exception:
-                # Tokens may already be visible. Keep the user response intact
-                # while recording the accounting failure for repair/audit.
-                db.rollback()
-                logger.exception("ceaser_stream_settlement_failed user_id=%s billing_id=%s", user_id, billing_id)
+                with anyio.CancelScope(shield=True):
+                    await run_serial_db(cleanup_stream)
             finally:
                 rate_limiter.release("chat-generation", user_id)
 

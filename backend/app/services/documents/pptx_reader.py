@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pptx import Presentation
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
 
 from app.services.documents.schemas import ExtractedDocument
 
 
 class PPTXReader:
     def read(self, path: Path) -> ExtractedDocument:
+        if Presentation is None:
+            return ExtractedDocument(title=path.stem, pages=0, content="", metadata={"reader": "unavailable"})
         presentation = Presentation(str(path))
         slides = []
         for index, slide in enumerate(presentation.slides, start=1):

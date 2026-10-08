@@ -10,14 +10,17 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.api.auth.routes import router as auth_router
 from app.api.admin.routes import router as admin_router
+from app.api.admin.internships import router as admin_internships_router
 from app.api.automations.routes import router as automations_router
 from app.api.agents.routes import router as agents_router
 from app.api.billing.routes import router as billing_router
 from app.api.capabilities.routes import router as capabilities_router
 from app.api.ceaser.routes import router as ceaser_router
+from app.api.certificates.routes import router as certificates_router
 from app.api.cloud.routes import router as cloud_router
 from app.api.commercial.routes import router as commercial_router
 from app.api.conversations.routes import router as conversations_router
@@ -93,7 +96,7 @@ def create_app() -> FastAPI:
         request.state.request_id = request_id
         started = perf_counter()
         request.state.ceaser_request_received_at = started
-        timing_tokens = begin_database_timing()
+        timing_tokens = begin_database_timing(request_id=request_id)
         try:
             response = await call_next(request)
             elapsed_ms = round((perf_counter() - started) * 1000)
@@ -103,6 +106,11 @@ def create_app() -> FastAPI:
             response.headers["X-Database-Time-Ms"] = str(database_ms)
             response.headers["X-Database-Query-Count"] = str(query_count)
             response.headers["Server-Timing"] = f"app;dur={elapsed_ms}, db;dur={database_ms}"
+            auth_trace = getattr(request.state, "ceaser_auth_trace", {})
+            for label, key in (("auth", "total_ms"), ("auth_remote", "remote_ms"), ("auth_db", "db_validation_ms")):
+                value = auth_trace.get(key)
+                if type(value) in (int, float) and 0 <= value < 3600000:
+                    response.headers["Server-Timing"] += f", {label};dur={value:.2f}"
             logger.info(
                 "request_complete method=%s path=%s status=%s request_id=%s elapsed_ms=%s db_ms=%s db_queries=%s",
                 request.method,
@@ -134,12 +142,29 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-Request-Id",
+            "X-Process-Time-Ms",
+            "X-Database-Time-Ms",
+            "X-Database-Query-Count",
+            "Server-Timing",
+        ],
         max_age=600,
     )
 
     @app.exception_handler(AIServiceUnavailableError)
     async def ai_service_unavailable_handler(request: Request, exc: AIServiceUnavailableError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": exc.public_message})
+
+    @app.exception_handler(SQLAlchemyTimeoutError)
+    async def database_pool_timeout_handler(request: Request, exc: SQLAlchemyTimeoutError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", None)
+        logger.warning("database_pool_timeout path=%s request_id=%s", request.url.path, request_id)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "CEASER is temporarily busy. Please try again in a moment."},
+            headers={"X-Request-Id": request_id or "", "Retry-After": "5"},
+        )
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -165,6 +190,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(admin_internships_router)
     app.include_router(automations_router)
     app.include_router(agents_router)
     app.include_router(capabilities_router)
@@ -177,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(messages_router)
     app.include_router(chat_router)
     app.include_router(ceaser_router)
+    app.include_router(certificates_router)
     app.include_router(cloud_router)
     app.include_router(billing_router)
     app.include_router(commercial_router)

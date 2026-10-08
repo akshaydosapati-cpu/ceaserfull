@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy.orm import Session
 
 from app.core.database.session import get_db
+from app.core.database.execution import run_serial_db
 from app.core.security.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.desktop import DesktopIntentRequest, DesktopIntentResponse
@@ -56,8 +57,8 @@ def list_desktop_devices(user: Annotated[User, Depends(get_current_user)], db: A
 
 @router.delete("/devices/{device_id}")
 async def revoke_desktop_device(device_id: str, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
-    DesktopAuthService(db).revoke(user, device_id=device_id)
-    AuditService(db).record(user_id=user.id, action="desktop_device_revoked", resource_type="desktop", resource_id=device_id)
+    await run_serial_db(DesktopAuthService(db).revoke, user, device_id=device_id)
+    await run_serial_db(AuditService(db).record, user_id=user.id, action="desktop_device_revoked", resource_type="desktop", resource_id=device_id)
     return {"status": "ok"}
 
 
@@ -74,7 +75,7 @@ async def submit_desktop_command(
     wait_seconds: float = Query(default=0, ge=0, le=30),
 ):
     try:
-        command = DeviceGatewayService(db).submit(user, payload)
+        command = await run_serial_db(DeviceGatewayService(db).submit, user, payload)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -82,8 +83,7 @@ async def submit_desktop_command(
     deadline = asyncio.get_running_loop().time() + wait_seconds
     while wait_seconds and asyncio.get_running_loop().time() < deadline and command.status not in ("COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"):
         await asyncio.sleep(0.1)
-        db.expire_all()
-        command = DeviceGatewayService(db).owned_command(user, payload.request_id)
+        command = await run_serial_db(lambda: (db.expire_all(), DeviceGatewayService(db).owned_command(user, payload.request_id))[1])
     return _command_read(command)
 
 
@@ -121,8 +121,9 @@ async def upload_signed_desktop_resource(
     signature: str = Query(...),
 ):
     content = await request.body()
-    resource = DesktopCloudService(db).complete_signed_upload(resource_id, purpose, expires, signature, content)
-    AuditService(db).record(
+    resource = await run_serial_db(DesktopCloudService(db).complete_signed_upload, resource_id, purpose, expires, signature, content)
+    await run_serial_db(
+        AuditService(db).record,
         user_id=resource.user_id,
         action="desktop_cloud_upload_completed",
         resource_type="desktop_cloud",

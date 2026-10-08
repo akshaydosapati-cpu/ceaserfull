@@ -95,6 +95,14 @@ def test_conversation_message_memory_project_and_file_persistence() -> None:
     assert conversation_response.status_code == 201
     conversation = conversation_response.json()
 
+    moved_conversation = client.patch(
+        f"/conversations/{conversation['id']}",
+        json={"project_id": project["id"], "pinned": True},
+    )
+    assert moved_conversation.status_code == 200
+    assert moved_conversation.json()["project_id"] == project["id"]
+    assert moved_conversation.json()["pinned"] is True
+
     message_response = client.post(
         "/messages",
         json={"conversation_id": conversation["id"], "role": "user", "content": "Remember the launch plan."},

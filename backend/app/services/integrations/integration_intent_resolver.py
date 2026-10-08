@@ -65,7 +65,7 @@ class IntegrationIntentResolver:
 
     def _is_notion_request(self, text: str) -> bool:
         return bool(
-            re.search(r"\b(?:notion|workspace|database|databases|page|pages|notes|tasks|assigned|assignee)\b", text)
+            re.search(r"\b(?:notion|workspace|database|databases|page|pages|notes|tasks|assigned|assignee|member|members|users|people|team)\b", text)
             or re.search(r"\b(?:add|create|make|insert|new)\b.{0,80}\b(?:task|todo|to-do)\b", text)
         )
 
@@ -74,6 +74,8 @@ class IntegrationIntentResolver:
         entities = {"query": query} if query else {}
         if re.search(r"\b(?:add|create|make|insert|new)\b.{0,80}\b(?:task|todo|to-do)\b", normalized):
             return IntegrationIntent("notion", "notion.create_task", self._notion_create_task_entities(message), 0.9)
+        if re.search(r"\b(?:member|members|users|people|team)\b", normalized) and not re.search(r"\b(?:task|tasks|assigned|assignee|assignment)\b", normalized):
+            return IntegrationIntent("notion", "notion.list_members", {}, 0.95)
         if re.search(r"\b(?:task|tasks|todo|to-do|assigned|assignee|assignment|owner|owners)\b", normalized):
             return IntegrationIntent("notion", "notion.list_tasks", entities, 0.93)
         if re.search(r"\b(?:database|databases)\b", normalized):

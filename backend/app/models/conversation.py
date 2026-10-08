@@ -12,6 +12,7 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "conversations"
 
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), index=True, nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -23,6 +24,7 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     state_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+    project: Mapped["Project | None"] = relationship()
 
     @property
     def conversation_summary(self) -> str | None:
